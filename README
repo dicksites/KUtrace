@@ -1,2 +1,6 @@
-This is a placeholder for the upcoming KUtrace project.
-/dick sites
+KUtrace is an extremely low-overhead Linux kernel tracing facility for observing all the execution time on all cores of a multi-core processor, nothing missing, while running completely unmodified user programs written in any computer language. It has been used in live datacenters (x86 processors) and in real-time autonomous driving (ARM processors) to understand long-standing performance mysteries. The design goal of KUtrace is to reveal the root cause(s) of unexpected delayed responses in real-time transactions or database processing while having such low overhead that it does not distort the system under test.
+
+See the kutrace/docs/overview.pdf file for more detail.
+
+Richard L. Sites, July 2019
+
