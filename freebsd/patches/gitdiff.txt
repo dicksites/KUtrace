@@ -1,0 +1,738 @@
+diff --git a/sys/amd64/amd64/trap.c b/sys/amd64/amd64/trap.c
+index 19b0c5065e68..06fb86454f32 100644
+--- a/sys/amd64/amd64/trap.c
++++ b/sys/amd64/amd64/trap.c
+@@ -103,6 +103,8 @@ PMC_SOFT_DEFINE( , , page_fault, write);
+ #include <sys/dtrace_bsd.h>
+ #endif
+ 
++#include <sys/kutrace.h>
++
+ extern inthand_t IDTVEC(bpt), IDTVEC(bpt_pti), IDTVEC(dbg),
+     IDTVEC(fast_syscall), IDTVEC(fast_syscall_pti), IDTVEC(fast_syscall32),
+     IDTVEC(int0x80_syscall_pti), IDTVEC(int0x80_syscall);
+@@ -381,8 +383,9 @@ trap(struct trapframe *frame)
+ 			if (*p->p_sysent->sv_trap != NULL &&
+ 			    (*p->p_sysent->sv_trap)(td) == 0)
+ 				return;
+-
++			kutrace1(KUTRACE_TRAP + KUTRACE_PAGEFAULT, 0);
+ 			pf = trap_pfault(frame, true, &signo, &ucode);
++			kutrace1(KUTRACE_TRAPRET + KUTRACE_PAGEFAULT, 0);
+ 			if (pf == -1)
+ 				return;
+ 			if (pf == 0)
+@@ -413,7 +416,9 @@ trap(struct trapframe *frame)
+ 			/* transparent fault (due to context switch "late") */
+ 			KASSERT(PCB_USER_FPU(td->td_pcb),
+ 			    ("kernel FPU ctx has leaked"));
++			kutrace1(KUTRACE_TRAP + KUTRACE_DNA, 0);
+ 			fpudna();
++			kutrace1(KUTRACE_TRAPRET + KUTRACE_DNA, 0);
+ 			return;
+ 
+ 		case T_FPOPFLT:		/* FPU operand fetch fault */
+@@ -440,13 +445,17 @@ trap(struct trapframe *frame)
+ 		    ("kernel trap doesn't have ucred"));
+ 		switch (type) {
+ 		case T_PAGEFLT:			/* page fault */
++			kutrace1(KUTRACE_TRAP + KUTRACE_PAGEFAULT, 0);
+ 			(void)trap_pfault(frame, false, NULL, NULL);
++			kutrace1(KUTRACE_TRAPRET + KUTRACE_PAGEFAULT, 0);
+ 			return;
+ 
+ 		case T_DNA:
+ 			if (PCB_USER_FPU(td->td_pcb))
+ 				panic("Unregistered use of FPU in kernel");
++			kutrace1(KUTRACE_TRAP + KUTRACE_DNA, 0);
+ 			fpudna();
++			kutrace1(KUTRACE_TRAPRET + KUTRACE_DNA, 0);
+ 			return;
+ 
+ 		case T_ARITHTRAP:	/* arithmetic trap */
+@@ -1084,6 +1093,7 @@ cpu_fetch_syscall_args(struct thread *td)
+ 	return (0);
+ }
+ 
++
+ #include "../../kern/subr_syscall.c"
+ 
+ static void (*syscall_ret_l1d_flush)(void);
+@@ -1188,6 +1198,7 @@ amd64_syscall(struct thread *td, int traced)
+ 		/* NOT REACHED */
+ 	}
+ #endif
++
+ 	syscallenter(td);
+ 
+ 	/*
+diff --git a/sys/amd64/conf/GENERIC b/sys/amd64/conf/GENERIC
+index 53c6043a0146..4decde8efabf 100644
+--- a/sys/amd64/conf/GENERIC
++++ b/sys/amd64/conf/GENERIC
+@@ -398,3 +398,6 @@ device		uinput			# install /dev/uinput cdev
+ options 	HID_DEBUG		# enable debug msgs
+ device		hid			# Generic HID support
+ options 	IICHID_SAMPLING		# Workaround missing GPIO INTR support
++
++#KUtrace support
++options		KUTRACE
+diff --git a/sys/conf/options.amd64 b/sys/conf/options.amd64
+index bc809553f841..be823c0d52d4 100644
+--- a/sys/conf/options.amd64
++++ b/sys/conf/options.amd64
+@@ -61,3 +61,4 @@ ISCI_LOGGING	opt_isci.h
+ 
+ # EFI Runtime services support
+ EFIRT			opt_efirt.h
++KUTRACE			opt_global.h
+diff --git a/sys/kern/kern_exec.c b/sys/kern/kern_exec.c
+index 33213c8304db..a8833a87eb32 100644
+--- a/sys/kern/kern_exec.c
++++ b/sys/kern/kern_exec.c
+@@ -88,6 +88,8 @@ __FBSDID("$FreeBSD$");
+ #include <vm/vm_object.h>
+ #include <vm/vm_pager.h>
+ 
++#include <sys/kutrace.h>
++
+ #ifdef	HWPMC_HOOKS
+ #include <sys/pmckern.h>
+ #endif
+@@ -100,6 +102,8 @@ __FBSDID("$FreeBSD$");
+ dtrace_execexit_func_t	dtrace_fasttrap_exec;
+ #endif
+ 
++
++
+ SDT_PROVIDER_DECLARE(proc);
+ SDT_PROBE_DEFINE1(proc, , , exec, "char *");
+ SDT_PROBE_DEFINE1(proc, , , exec__failure, "int");
+@@ -789,6 +793,8 @@ do_execve(struct thread *td, struct image_args *args, struct mac *mac_p,
+ 	else if (vn_commname(newtextvp, p->p_comm, sizeof(p->p_comm)) != 0)
+ 		bcopy(fexecv_proc_title, p->p_comm, sizeof(fexecv_proc_title));
+ 	bcopy(p->p_comm, td->td_name, sizeof(td->td_name));
++	/* Record the new name for this thread */
++	kutrace_pidrename(td);
+ #ifdef KTR
+ 	sched_clear_tdname(td);
+ #endif
+diff --git a/sys/kern/kern_fork.c b/sys/kern/kern_fork.c
+index 0062f7419ac0..8f6dd730fc97 100644
+--- a/sys/kern/kern_fork.c
++++ b/sys/kern/kern_fork.c
+@@ -85,6 +85,8 @@ __FBSDID("$FreeBSD$");
+ #include <vm/vm_extern.h>
+ #include <vm/uma.h>
+ 
++#include <sys/kutrace.h>
++
+ #ifdef KDTRACE_HOOKS
+ #include <sys/dtrace_bsd.h>
+ dtrace_fork_func_t	dtrace_fasttrap_fork;
+@@ -470,6 +472,8 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
+ 	    __rangeof(struct thread, td_startcopy, td_endcopy));
+ 
+ 	bcopy(&p2->p_comm, &td2->td_name, sizeof(td2->td_name));
++	/* Record the new name for this thread */
++	kutrace_pidrename(td2);
+ 	td2->td_sigstk = td->td_sigstk;
+ 	td2->td_flags = TDF_INMEM;
+ 	td2->td_lend_user_pri = PRI_MAX;
+diff --git a/sys/kern/kern_thr.c b/sys/kern/kern_thr.c
+index 18722cc6a73d..296fc7bfef1b 100644
+--- a/sys/kern/kern_thr.c
++++ b/sys/kern/kern_thr.c
+@@ -56,6 +56,9 @@ __FBSDID("$FreeBSD$");
+ #include <sys/rtprio.h>
+ #include <sys/umtxvar.h>
+ #include <sys/limits.h>
++
++#include <sys/kutrace.h>
++
+ #ifdef	HWPMC_HOOKS
+ #include <sys/pmckern.h>
+ #endif
+@@ -252,6 +255,8 @@ thread_create(struct thread *td, struct rtprio *rtp,
+ 	p->p_flag |= P_HADTHREADS;
+ 	thread_link(newtd, p);
+ 	bcopy(p->p_comm, newtd->td_name, sizeof(newtd->td_name));
++	/* Record the new name for this thread */
++	kutrace_pidrename(newtd);
+ 	thread_lock(td);
+ 	/* let the scheduler know about these things. */
+ 	sched_fork_thread(td, newtd);
+diff --git a/sys/kern/sched_ule.c b/sys/kern/sched_ule.c
+index 9fd592f9647b..733dfe796e75 100644
+--- a/sys/kern/sched_ule.c
++++ b/sys/kern/sched_ule.c
+@@ -65,6 +65,7 @@ __FBSDID("$FreeBSD$");
+ #include <sys/vmmeter.h>
+ #include <sys/cpuset.h>
+ #include <sys/sbuf.h>
++#include <sys/kutrace.h>
+ 
+ #ifdef HWPMC_HOOKS
+ #include <sys/pmckern.h>
+@@ -949,6 +950,7 @@ sched_balance_pair(struct tdq *high, struct tdq *low)
+ 		 * new load, possibly sending an IPI to force it to reschedule.
+ 		 */
+ 		cpu = TDQ_ID(low);
++
+ 		if (cpu != PCPU_GET(cpuid))
+ 			tdq_notify(low, td);
+ 	}
+@@ -2144,6 +2146,7 @@ sched_switch(struct thread *td, int flags)
+ 
+ 	THREAD_LOCK_ASSERT(td, MA_OWNED);
+ 
++	kutrace1(KUTRACE_SYSCALL64 + KUTRACE_SCHEDSYSCALL, 0);
+ 	cpuid = PCPU_GET(cpuid);
+ 	tdq = TDQ_SELF();
+ 	ts = td_get_sched(td);
+@@ -2238,6 +2241,8 @@ sched_switch(struct thread *td, int flags)
+ 		if (dtrace_vtime_active)
+ 			(*dtrace_vtime_switch_func)(newtd);
+ #endif
++		kutrace_pidname(newtd);
++		kutrace1(KUTRACE_USERPID, newtd->td_tid - (PID_MAX + 1));
+ 		td->td_oncpu = NOCPU;
+ 		cpu_switch(td, newtd, mtx);
+ 		cpuid = td->td_oncpu = PCPU_GET(cpuid);
+@@ -2256,6 +2261,7 @@ sched_switch(struct thread *td, int flags)
+ 
+ 	KTR_STATE1(KTR_SCHED, "thread", sched_tdname(td), "running",
+ 	    "prio:%d", td->td_priority);
++	kutrace1(KUTRACE_SYSRET64 + KUTRACE_SCHEDSYSCALL, 0);
+ }
+ 
+ /*
+@@ -2680,6 +2686,9 @@ sched_add(struct thread *td, int flags)
+ 	    KTR_ATTR_LINKED, sched_tdname(td));
+ 	SDT_PROBE4(sched, , , enqueue, td, td->td_proc, NULL, 
+ 	    flags & SRQ_PREEMPTED);
++	if (TD_CAN_RUN(td)) {
++		kutrace1(KUTRACE_RUNNABLE, td->td_tid - (PID_MAX + 1));
++	}
+ 	THREAD_LOCK_ASSERT(td, MA_OWNED);
+ 	/*
+ 	 * Recalculate the priority before we select the target cpu or
+@@ -3036,6 +3045,9 @@ sched_throw(struct thread *td)
+ 	struct thread *newtd;
+ 	struct tdq *tdq;
+ 
++	kutrace1(KUTRACE_SYSCALL64 + KUTRACE_SCHEDSYSCALL, 0);
++	/* Matching return will be synthesized by KUtrace postprocessing if needed */
++	 
+ 	tdq = TDQ_SELF();
+ 
+ 	MPASS(td != NULL);
+@@ -3048,6 +3060,8 @@ sched_throw(struct thread *td)
+ 	thread_lock_block(td);
+ 
+ 	newtd = sched_throw_grab(tdq);
++	kutrace_pidname(newtd);
++	kutrace1(KUTRACE_USERPID, newtd->td_tid - (PID_MAX + 1));
+ 
+ 	/* doesn't return */
+ 	cpu_switch(td, newtd, TDQ_LOCKPTR(tdq));
+diff --git a/sys/kern/subr_syscall.c b/sys/kern/subr_syscall.c
+index 33dd50d3d50a..7c56242df895 100644
+--- a/sys/kern/subr_syscall.c
++++ b/sys/kern/subr_syscall.c
+@@ -53,6 +53,7 @@ __FBSDID("$FreeBSD$");
+ #include <sys/ktrace.h>
+ #endif
+ #include <security/audit/audit.h>
++#include <sys/kutrace.h>
+ 
+ static inline void
+ syscallenter(struct thread *td)
+@@ -63,9 +64,16 @@ syscallenter(struct thread *td)
+ 	int error, traced;
+ 	bool sy_thr_static;
+ 
++	
+ 	VM_CNT_INC(v_syscall);
+ 	p = td->td_proc;
+ 	sa = &td->td_sa;
++	
++#if 0
++	/* Can we cover more of the syscall code? */
++	kutrace1(KUTRACE_SYSCALL64 + kutrace_map_nr(sa->code),
++		sa->args[0] & 0xffffUL);
++#endif
+ 
+ 	td->td_pticks = 0;
+ 	if (__predict_false(td->td_cowgen != atomic_load_int(&p->p_cowgen)))
+@@ -92,6 +100,11 @@ syscallenter(struct thread *td)
+ 		td->td_errno = error;
+ 		goto retval;
+ 	}
++	
++#if 1
++	kutrace1(KUTRACE_SYSCALL64 + kutrace_map_nr(sa->code),
++		sa->args[0] & 0xffffUL);
++#endif
+ 
+ 	if (__predict_false(traced)) {
+ 		PROC_LOCK(p);
+@@ -205,6 +218,11 @@ syscallenter(struct thread *td)
+ 		PROC_UNLOCK(p);
+ 	}
+ 	(p->p_sysent->sv_set_syscall_retval)(td, error);
++	
++#if 1
++	kutrace1(KUTRACE_SYSRET64 + kutrace_map_nr(sa->code),
++		td->td_retval[0] & 0xffffUL);
++#endif
+ }
+ 
+ static inline void
+@@ -285,4 +303,10 @@ syscallret(struct thread *td)
+ 		td->td_dbgflags &= ~(TDB_SCX | TDB_EXEC | TDB_FORK);
+ 		PROC_UNLOCK(p);
+ 	}
++	
++#if 0
++	/* Can we cover more of the syscall code? */
++	kutrace1(KUTRACE_SYSRET64 + kutrace_map_nr(sa->code),
++		td->td_retval[0] & 0xffffUL);
++#endif
+ }
+diff --git a/sys/kern/subr_trap.c b/sys/kern/subr_trap.c
+index 52559c162249..4d8c7c2025bb 100644
+--- a/sys/kern/subr_trap.c
++++ b/sys/kern/subr_trap.c
+@@ -87,6 +87,13 @@ __FBSDID("$FreeBSD$");
+ #include <sys/pmckern.h>
+ #endif
+ 
++#ifdef KUTRACE
++#include <sys/kutrace.h>
++struct kutrace_ops kutrace_global_ops;
++bool kutrace_tracing;
++uint64_t* kutrace_pid_filter;
++#endif
++
+ #include <security/mac/mac_framework.h>
+ 
+ void (*softdep_ast_cleanup)(struct thread *);
+@@ -231,6 +238,8 @@ ast(struct trapframe *framep)
+ 	THREAD_LOCK_ASSERT(td, MA_NOTOWNED);
+ 	td->td_frame = framep;
+ 	td->td_pticks = 0;
++	
++	kutrace1(KUTRACE_IRQ + KUTRACE_BOTTOM_HALF, AST_SOFTIRQ);	
+ 
+ 	/*
+ 	 * This updates the td_flag's for the checks below in one
+@@ -381,6 +390,8 @@ ast(struct trapframe *framep)
+ #endif
+ 
+ 	userret(td, framep);
++	
++	kutrace1(KUTRACE_IRQRET + KUTRACE_BOTTOM_HALF, AST_SOFTIRQ);
+ }
+ 
+ const char *
+diff --git a/sys/sys/kutrace.h b/sys/sys/kutrace.h
+new file mode 100644
+index 000000000000..4408b2d5420b
+--- /dev/null
++++ b/sys/sys/kutrace.h
+@@ -0,0 +1,224 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
++ *
++ * Copyright (C) 2022 Richard L. Sites <dick.sites@gmail.com>.
++ *  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice(s), this list of conditions and the following disclaimer as
++ *    the first lines of this file unmodified other than the possible
++ *    addition of one or more copyright notices.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice(s), this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER(S) ``AS IS'' AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) BE LIABLE FOR ANY
++ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
++ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
++ * DAMAGE.
++ */
++
++/*
++ * Kernel include file kutrace.h FOR FreeBSD ONLY, not Linux
++ *
++ * KUtrace is a facility to produce a trace of every transition between kernel-mode 
++ * execution and user-mode execution on every CPU core of a running production system, 
++ * with less than 1% overhead. In addition to every non-debug non-fatal system call/
++ * return, interrupt/return, trap/return, and context switch, there are trace entries 
++ * for making a thread runnable, thread wakeup via IPI or monitor/mwait, CPU frequency, 
++ * low-power states, and text names for everything. Optionally, instructions per cycle, 
++ * IPC, is recorded for every microsecond-scale time interval.
++ *
++ * The companion loadable module allocates the kernel-memory raw trace buffer, implements 
++ * the calls defined here, and implements a simple control interface to start/stop 
++ * tracing, insert user-provided markers and other trace entries, and extract the 
++ * recorded data. 
++ *
++ * Companion postprocessing routines turn raw traces into dynamic HTML whose timeline 
++ * can be panned and zoomed over nine orders of magnitude, from about 100 seconds across 
++ * to 100 nanoseconds across.
++ *
++ * Most kernel source patches will be something like
++ *   kutrace1(event, arg);
++ *
++ */
++
++
++#ifndef KUTRACE_H
++#define KUTRACE_H
++
++#include <sys/types.h>
++
++
++/* This is a shortened list of kernel-mode raw trace 12-bit event numbers */
++/* See user-mode kutrace_lib.h for the full set */
++
++/* Entry to provide names for PIDs (actually thread IDs) */
++#define KUTRACE_PIDNAME		0x002
++
++#define KUTRACE_PC_TEMP		0x101	/* postproc turns into PC_U or PC_K */
++
++// Specials are point events
++#define KUTRACE_USERPID		0x200	/* Context switch: new PID */
++#define KUTRACE_RPCIDRXPKT	0x204
++#define KUTRACE_RPCIDTXPKT	0x205
++#define KUTRACE_RUNNABLE	0x206	/* Set process runnable: PID/TID */
++#define KUTRACE_IPI		0x207	/* Send IPI; receive is an interrupt */
++#define KUTRACE_MWAIT		0x208	/* C-states */
++#define KUTRACE_PSTATE		0x209	/* P-states (frequency) */
++#define KUTRACE_MONITORSTORE	0x21E	/* Store into a monitored location; wakeup */
++#define KUTRACE_MONITOREXIT	0x21f	/* Mwait exit due to store above */
++
++/* These are in blocks of 256 numbers */
++#define KUTRACE_TRAP		0x0400  /* AKA fault */
++#define KUTRACE_IRQ		0x0500
++#define KUTRACE_TRAPRET		0x0600
++#define KUTRACE_IRQRET		0x0700
++
++/* These are in blocks of 512 numbers */
++#define KUTRACE_SYSCALL64	0x0800
++#define KUTRACE_SYSRET64	0x0A00
++#define KUTRACE_SYSCALL32	0x0C00	/* Now syscall64 high block */
++#define KUTRACE_SYSRET32	0x0E00	/* Now sysret64 high block */
++
++/* Specific syscall numbers */
++/* Take over last syscall32 number for tracing the scheduler call/return */
++#define KUTRACE_SCHEDSYSCALL 1535	/* Top syscall32: 1023 + 512 */
++
++/* Specific trap numbers */
++#define KUTRACE_DNA		7	/* Device (8087) not available */
++#define KUTRACE_PAGEFAULT	14
++
++/* Specific IRQ numbers. Picked from arch/x86/include/asm/irq_vectors.h */
++#define KUTRACE_LOCAL_TIMER_VECTOR	0xec
++
++/* Reuse the spurious_apic vector to show bottom halves (AST) executing */
++#define KUTRACE_BOTTOM_HALF	255
++#define AST_SOFTIRQ		15
++
++
++/* Procedure interface to loadable module or compiled-in kutrace.c */
++struct kutrace_ops {
++       void (*kutrace_trace_1)(uint64_t num, uint64_t arg);
++       void (*kutrace_trace_2)(uint64_t num, uint64_t arg1, uint64_t arg2);
++       void (*kutrace_trace_many)(uint64_t num, uint64_t len, const char *arg);
++       uint64_t (*kutrace_trace_control)(uint64_t command, uint64_t arg);
++};
++
++/* Packet tracing is not yet implemented for FreeBSD */
++/* Packet filter parameters */
++struct kutrace_nf {
++	uint64_t hash_init;
++	uint64_t hash_mask[3];
++};
++
++
++#ifdef KUTRACE
++
++/* Global variables used by KUtrace */
++/* Declared here and instantiated in sys/kern/subr_trap.c */
++extern bool kutrace_tracing;
++extern struct kutrace_ops kutrace_global_ops;
++extern uint64_t *kutrace_pid_filter;
++
++/* Macros used by KUtrace */
++/* Insert pid name if first time seen. Races don't matter here. */
++#define kutrace_pidname(next) \
++       if (kutrace_tracing) { \
++               uint32_t tid = next->td_tid - (PID_MAX + 1); \
++               uint32_t pid16 = tid & 0xffff; \
++               uint32_t pid_hi = pid16 >> 6; \
++               uint64_t pid_bit = 1ull << (pid16 & 0x3f); \
++               if ((kutrace_pid_filter[pid_hi] & pid_bit) == 0) { \
++                       uint64_t name_entry[3]; \
++                       name_entry[0] = tid; \
++                       memcpy(&name_entry[1], next->td_name, 16); \
++                       (*kutrace_global_ops.kutrace_trace_many)( \
++                        KUTRACE_PIDNAME, 3l, (const char*)&name_entry[0]); \
++                       kutrace_pid_filter[pid_hi] |= pid_bit; \
++               } \
++       }
++       
++/* Unconditionally insert or reset pid name. Races don't matter here. */
++#define kutrace_pidrename(next) \
++	if (kutrace_tracing) { \
++        	uint32_t tid = next->td_tid - (PID_MAX + 1); \
++        	uint32_t pid16 = tid & 0xffff; \
++		uint32_t pid_hi = pid16 >> 6; \
++		uint64_t pid_bit = 1ull << (pid16 & 0x3f); \
++		if (true) { \
++			uint64_t name_entry[3]; \
++			name_entry[0] = tid; \
++			memcpy(&name_entry[1], next->td_name, 16); \
++			(*kutrace_global_ops.kutrace_trace_many)( \
++			 KUTRACE_PIDNAME, 3l, (const char*)&name_entry[0]); \
++			kutrace_pid_filter[pid_hi] |= pid_bit; \
++		} \
++	}
++
++/* Packet tracing is not yet implemented for FreeBSD */
++/* Filter packet payload; if it passes insert a payload hash into trace */
++/* Mask first payload 24 bytes, XOR, and check for expected value */
++/* ku_payload might not be 8-byte aligned, but only 4-byte */
++#define kutrace_pkttrace(rx_tx, ku_payload) \
++	if (kutrace_tracing) { \
++		uint64_t hash = kutrace_net_filter.hash_init; \
++		hash ^= (ku_payload[0] & kutrace_net_filter.hash_mask[0]); \
++		hash ^= (ku_payload[1] & kutrace_net_filter.hash_mask[1]); \
++		hash ^= (ku_payload[2] & kutrace_net_filter.hash_mask[2]); \
++		hash ^= (hash >> 32); \
++		hash &= 0x00000000ffffffffLLU;	/* The filter hash */ \
++		if (hash == 0) { \
++			/* We passed the filter; hash unmasked first 32 bytes to 4 */ \
++			hash = ku_payload[0] ^ ku_payload[1] ^ \
++			       ku_payload[2] ^ ku_payload[3]; \
++			hash ^= (hash >> 32); \
++			hash &= 0x00000000ffffffffLLU; \
++			kutrace1(rx_tx, hash); \
++		} \
++	}
++
++/* Record 64-bit PC sample and CPU frequency if available at timer interrupts */
++#define kutrace_pc(arg) \
++	if (kutrace_tracing) { \
++		(*kutrace_global_ops.kutrace_trace_2)(KUTRACE_PC_TEMP, 0, arg); \
++	}
++
++/* Record a normal 64-bit raw trace entry */
++#define kutrace1(event, arg) \
++	if (kutrace_tracing) { \
++		(*kutrace_global_ops.kutrace_trace_1)(event, arg); \
++	}
++
++/* Historically, syscall numbers were < 512, but now less-dense numbering exceeds 512. 
++ * We store these in two dis-contiguous 512-number blocks, repurposing the unused 
++ * 32-bit syscall block.
++ * map_nr moves high 64-bit syscalls 0x200..3FF to low sys32 space 0x400..5FF
++ */
++#define	kutrace_map_nr(nr) (nr + (nr & 0x200)) 
++
++#else
++
++#define kutrace_pidname(next)
++#define kutrace_pidrename(next)
++#define kutrace_pkttrace(rx_tx, ku_payload)
++#define kutrace_pc(arg)
++#define kutrace1(event, arg)
++#define kutrace_map_nr(nr) (nr)
++
++#endif /* KUTRACE */
++
++#endif /* KUTRACE_H */
++
++
++
+diff --git a/sys/x86/x86/cpu_machdep.c b/sys/x86/x86/cpu_machdep.c
+index f20611ffa20e..9a7f36a1b4c0 100644
+--- a/sys/x86/x86/cpu_machdep.c
++++ b/sys/x86/x86/cpu_machdep.c
+@@ -104,6 +104,8 @@ __FBSDID("$FreeBSD$");
+ 
+ #include <contrib/dev/acpica/include/acpi.h>
+ 
++#include <sys/kutrace.h>
++
+ #define	STATE_RUNNING	0x0
+ #define	STATE_MWAIT	0x1
+ #define	STATE_SLEEPING	0x2
+@@ -286,8 +288,11 @@ acpi_cpu_idle_mwait(uint32_t mwait_hint)
+ 		v = 0;
+ 	}
+ 	cpu_monitor(state, 0, 0);
++	kutrace1(KUTRACE_MWAIT, mwait_hint);
+ 	if (atomic_load_int(state) == STATE_MWAIT)
+ 		cpu_mwait(MWAIT_INTRBREAK, mwait_hint);
++	/* Equivalent to IRQ_IPI_RESCHED, waking up blocked thread */
++	kutrace1(KUTRACE_MONITOREXIT, 1);
+ 
+ 	/*
+ 	 * SSB cannot be disabled while we sleep, or rather, if it was
+@@ -600,8 +605,12 @@ cpu_idle_mwait(sbintime_t sbt)
+ 	}
+ 
+ 	cpu_monitor(state, 0, 0);
+-	if (atomic_load_int(state) == STATE_MWAIT)
++	if (atomic_load_int(state) == STATE_MWAIT) {
++		kutrace1(KUTRACE_MWAIT, MWAIT_C1);
+ 		__asm __volatile("sti; mwait" : : "a" (MWAIT_C1), "c" (0));
++		/* Equivalent to IRQ_IPI_RESCHED, waking up blocked thread */
++		kutrace1(KUTRACE_MONITOREXIT, 2);
++	}
+ 	else
+ 		enable_intr();
+ 	atomic_store_int(state, STATE_RUNNING);
+@@ -694,6 +703,10 @@ cpu_idle_wakeup(int cpu)
+ 	case STATE_SLEEPING:
+ 		return (0);
+ 	case STATE_MWAIT:
++		/* This stores into a monitored address, */
++		/*   pulling another CPU out if its idle loop. */
++		/* Equivalent to sending IPI_REQCHEDULE */
++		kutrace1(KUTRACE_MONITORSTORE, 0);
+ 		atomic_store_int(state, STATE_RUNNING);
+ 		return (cpu_idle_apl31_workaround ? 0 : 1);
+ 	case STATE_RUNNING:
+diff --git a/sys/x86/x86/intr_machdep.c b/sys/x86/x86/intr_machdep.c
+index 8f47450b17c3..6fcff9af8a94 100644
+--- a/sys/x86/x86/intr_machdep.c
++++ b/sys/x86/x86/intr_machdep.c
+@@ -63,6 +63,7 @@
+ #ifdef DDB
+ #include <ddb/ddb.h>
+ #endif
++#include <sys/kutrace.h>
+ 
+ #ifndef DEV_ATPIC
+ #include <machine/segments.h>
+@@ -350,6 +351,7 @@ intr_execute_handlers(struct intsrc *isrc, struct trapframe *frame)
+ 	if (vector == 0)
+ 		clkintr_pending = 1;
+ 
++	kutrace1(KUTRACE_IRQ + (vector & 0xFF), 0);
+ 	/*
+ 	 * For stray interrupts, mask and EOI the source, bump the
+ 	 * stray count, and log the condition.
+@@ -364,6 +366,7 @@ intr_execute_handlers(struct intsrc *isrc, struct trapframe *frame)
+ 			    "too many stray irq %d's: not logging anymore\n",
+ 			    vector);
+ 	}
++	kutrace1(KUTRACE_IRQRET + (vector & 0xFF), 0);
+ }
+ 
+ void
+diff --git a/sys/x86/x86/local_apic.c b/sys/x86/x86/local_apic.c
+index 8e3c7eb27078..b4a8b032e6d4 100644
+--- a/sys/x86/x86/local_apic.c
++++ b/sys/x86/x86/local_apic.c
+@@ -80,6 +80,8 @@ __FBSDID("$FreeBSD$");
+ #include <ddb/ddb.h>
+ #endif
+ 
++#include <sys/kutrace.h>
++
+ #ifdef __amd64__
+ #define	SDT_APIC	SDT_SYSIGT
+ #define	GSEL_APIC	0
+@@ -1326,11 +1328,11 @@ lapic_handle_timer(struct trapframe *frame)
+ 	if (CPU_ISSET(PCPU_GET(cpuid), &hlt_cpus_mask))
+ 		return;
+ #endif
+-
+ 	/* Look up our local APIC structure for the tick counters. */
+ 	la = &lapics[PCPU_GET(apic_id)];
+ 	(*la->la_timer_count)++;
+ 	critical_enter();
++	kutrace1(KUTRACE_IRQ + KUTRACE_LOCAL_TIMER_VECTOR, 0);
+ 	if (lapic_et.et_active) {
+ 		td = curthread;
+ 		td->td_intr_nesting_level++;
+@@ -1340,6 +1342,12 @@ lapic_handle_timer(struct trapframe *frame)
+ 		td->td_intr_frame = oldframe;
+ 		td->td_intr_nesting_level--;
+ 	}
++	kutrace1(KUTRACE_IRQRET + KUTRACE_LOCAL_TIMER_VECTOR, 0);
++	
++	/* dsites 2021.09.19 Trace return address -- we are also a profiler now */
++	/*  This call will insert the current CPU frequency if available */
++	kutrace_pc(frame->tf_rip)
++
+ 	critical_exit();
+ }
+ 
+diff --git a/sys/x86/x86/mp_x86.c b/sys/x86/x86/mp_x86.c
+index 8ac5e4b4ddc2..9f0b64beb1da 100644
+--- a/sys/x86/x86/mp_x86.c
++++ b/sys/x86/x86/mp_x86.c
+@@ -89,6 +89,8 @@ __FBSDID("$FreeBSD$");
+ #include <dev/acpica/acpivar.h>
+ #endif
+ 
++#include <sys/kutrace.h>
++
+ static MALLOC_DEFINE(M_CPUS, "cpus", "CPU items");
+ 
+ /* lock region used by kernel profiling */
+@@ -1277,6 +1279,7 @@ ipi_send_cpu(int cpu, u_int ipi)
+ 	KASSERT((u_int)cpu < MAXCPU && cpu_apic_ids[cpu] != -1,
+ 	    ("IPI to non-existent CPU %d", cpu));
+ 
++	kutrace1(KUTRACE_IPI, cpu);
+ 	if (IPI_IS_BITMAPED(ipi)) {
+ 		if (ipi_bitmap_set(cpu, ipi))
+ 			return;
+@@ -1295,6 +1298,7 @@ ipi_bitmap_handler(struct trapframe frame)
+ 
+ 	kasan_mark(&frame, sizeof(frame), sizeof(frame), 0);
+ 
++	kutrace1(KUTRACE_IRQ + IPI_BITMAP_VECTOR, 0);
+ 	td = curthread;
+ 	ipi_bitmap = atomic_readandclear_int(&cpuid_to_pcpu[cpu]->
+ 	    pc_ipi_bitmap);
+@@ -1338,6 +1342,7 @@ ipi_bitmap_handler(struct trapframe frame)
+ 	td->td_intr_nesting_level--;
+ 	if (ipi_bitmap & (1 << IPI_HARDCLOCK))
+ 		critical_exit();
++	kutrace1(KUTRACE_IRQRET + IPI_BITMAP_VECTOR, 0);
+ }
+ 
+ /*
+@@ -1483,6 +1488,7 @@ cpustop_handler(void)
+ 	u_int cpu;
+ 	bool use_mwait;
+ 
++	kutrace1(KUTRACE_IRQ + IPI_STOP, 0);
+ 	cpu = PCPU_GET(cpuid);
+ 
+ 	savectx(&stoppcbs[cpu]);
+@@ -1520,6 +1526,7 @@ cpustop_handler(void)
+ 	}
+ 
+ 	cpustop_handler_post(cpu);
++	kutrace1(KUTRACE_IRQRET + IPI_STOP, 0);
+ }
+ 
+ static void

@@ -1,0 +1,26 @@
+.TH KUTRACE(7) 1
+.SH NAME
+.B KUtrace
+\- kernel-user tracing
+.\"
+.SH SYNOPSIS
+.B KUtrace 
+records a \fIcomplete\fR trace of every \fItransition\fR between kernel- and 
+user-mode execution on all CPU cores.
+It is implemented as a small set of kernel patches that use macros to
+call out to a loadable module that writes trace entries to a kernel buffer. 
+There is a control program to turn tracing on and off and to write out a raw trace file.
+Postprocessing this trace file turns it into dynamic HTML for display of 
+all the traced timespans on all CPU cores, 
+showing what kernel- or user-mode code is executing each nanosecond. 
+There is no subsetting and thus nothing missing from a trace.
+.P
+Unlike other trace tools, KUtrace is designed to have tiny overhead of less than 1%
+while tracing all events on all cores in busy datacenter or realtime systems.
+.\"
+.SH SEE ALSO
+See \fIkutrace_mod\fR(7) for the kernel patch macros and loadable module description.
+See \fIkutrace_control\fR(7) for the controlling user-mode library. 
+See \fIkutrace_postproc\fR(7) for the downstream programs to turn
+raw traces into dynamic HTML files to display. More information is available in 
+the Addison-Wesley book \fIUnderstanding Software Dynamics\fR by Richard L. Sites (2022).
