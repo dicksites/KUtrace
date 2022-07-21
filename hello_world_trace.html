@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <meta charset="UTF-8">
-<!-- Copyright 2021 Richard L. Sites -->
+<!-- Copyright 2022 Richard L. Sites -->
  
 <head>
  
@@ -383,13 +383,29 @@ var myString = '  {  "Comment" : "V2 with IPC field",  "axisLabelX" : "Time (sec
 // Global constants                                                           //
 //----------------------------------------------------------------------------//
 
+// Version control for this file
+var script_edit_date = "(ver2022-07-14)";  // Shown in secondary menu for identification
+
 var book = false;		// Set true to get defaults for creating book diagrams
 
-// Constants used in layout
-const kOverheadNs = 20;		// Approximate KUtrace overhead for one event
-const kOverheadIpcNs = 50;	// Approximate KUtrace overhead for one event with IPC recording
+// Almost-constants used in layout
+var gOverheadNs    = 20;	// Approximate KUtrace overhead for one event
+var gOverheadIpcNs = 50;	// Approximate KUtrace overhead for one event with IPC recording
 
+// Risc-v Unmatched board overhead is much larger
+const kRVOverheadNs    = 400;	// Approximate KUtrace overhead for one event
+const kRVOverheadIpcNs = 400;	// Approximate KUtrace overhead for one event with IPC recording
+const kRVMinShowOvhd = 0.000040;  // Always show overhead if width lt this (seconds)
+
+// More almost-constants
+// Suppress arcs that are a small fraction of the display window
+//  if the window width is greater than minwidth milliseconds
+var arcfraction = 0.05;    	// Small fraction of window width to suppress arc
+var gMinShowArc  = 0.010000;  	// Always show arcs if window width < this (seconds)
+var gMinShowOvhd = 0.000008;  	// Always show overhead if width < this (seconds)
+var xpixelfraction = 1.0;  	// What fraction of a pixel width to do full draw
 const kNetworkMbPerSec = 1000;	// Default: 1 Gb/s
+
 
 // Little usage hints to display
 const kUsageText = "Scroll wheel to zoom. Click-drag to pan. " + 
@@ -433,12 +449,17 @@ const waitbase =    0x00300;
 const faultbase =   0x00400;
 const irqbase =     0x00500;
 const syscallbase = 0x00800;
-const schedbase =   0x009FF;
+const schedbase =   0x009FF;	// Linux x86 dense syscalls
+const schedbase2 =  0x00DFF;	// FreeBSD and other sparse syscalls
 const rxtxbase =    0x00FFE;
 const ovhdbase =    0x00FFF;
 const userbase =    0x10000;
 const idlebase =    0x10000;
 const cexitbase =   0x20000;
+
+const CR = 13;			// Ascii carriage-return 
+const searchlistMax = 20;
+const searchlistMaxDisplay = 7;
 
 
 // Pixel-banging in layout
@@ -586,8 +607,11 @@ const freq_color_range = ["#E00000", "#E0C000", "#E0C000", "#E0C000",
                           "#00C000", "#00C000", "#00C000", "#00C000"];
 
 // Green is not quite clear for full speed; very light green
-const freq_opacity_range = [0.5, 0.4, 0.4, 0.3, 0.3, 0.2, 0.2, 0.05, 
-                            0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05];
+const freq_opacity_range =      [0.5, 0.4, 0.4, 0.3, 0.3, 0.2, 0.2, 0.05, 
+                                 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05];
+// Green is not quite clear for full speed; very light green
+const freq_bold_opacity_range = [0.6, 0.5, 0.5, 0.4, 0.4, 0.3, 0.3, 0.15, 
+                                 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15];
 
 //----------------------------------------------------------------------------//
 // Global Morse code constant dot-dash patterns and colors                    //
@@ -712,7 +736,7 @@ const ipc_value_max = 3;		// 0: none, 1: kernel, 2: user, 3: all
 const marks_value_max = 3;		// 0: none, 1: number, 2: text, 3: all
 const arcs_value_max = 2;		// 0: none, 1: bold, 2: normal
 const waits_value_max = 1;		// 0: none, 1: all
-const freq_value_max = 2;		// 0: none, 1:region3 overlay, 2: gradient
+const freq_value_max = 2;		// 0: none, 1:bold, 2: show CPU frequency
 const ovhd_value_max = 1;		// 0: none, 1: show overhead time
 const lock_value_max = 2;		// 0: none, 1: bold, 2: show lock-held lines 
 const cb_value_max = 1;			// 0: normal colors, 1: color-blind colors
@@ -789,6 +813,8 @@ var svgdotgbare, innersvgbare, innersvgdotgbare;
 var region2, region2dotg;
 var reddot;
 
+var searchlist = [];
+
 
 //----------------------------------------------------------------------------//
 // Globals for X-axis                                                         //
@@ -818,8 +844,6 @@ var realxleft;
 var realxright;
 var realxrightmost;	  // includes the margin.right padding
 var xdomainwidth;	  // abs(right - left)
-var arcfraction = 0.05;   // What fraction of window width to draw an arc
-var xpixelfraction = 1.0;  // What fraction of a pixel width to do full draw
 var xsecperpix = 0;	  // Only do full drawing of items >= xsecperpix
  
 // Changed in calculateBasetime
@@ -1025,10 +1049,10 @@ var state = {
 //  usec_lo_time: 0,		// Actually nsec/usec/msec now
 //  usec_hi_time: 0,		//  see state2.minmax_units_value 
 
-  // Last single item annotated, even across pan/zoom
+// Last single item annotated, even across pan/zoom
 //  annotated_one_d: -1,		// subscript of nearest previously-annotated highlited item
 
-  //Part of a view. Reconstruct hilite_event_array from here
+//Part of a view. Reconstruct hilite_event_array from here
 //  rowToHilite: [],
 
   // These variables are just for save/restore export of initial view
@@ -1073,6 +1097,7 @@ var aspectv = 0; 			// Initially, any
 var legend_value = 0;
 var fade_value = 0;
 var force_annot = false;	// Used in drawing legend
+var is_riscv = false;		// Show larger overhead if risc-v
 
 
 //
@@ -1339,6 +1364,15 @@ function FindNearestAnnotated(t) {
 
 function initializeState() {
 console.log("initializeState");
+  // If book is true, make these UI changes at startup:
+  //   Show secondary UI
+  //   Use short-line annotations
+  //   Make arcs bold
+  //   Suppress frequency overlay
+  //   Make y-axis chars smaller
+  //   Make axis font larger
+  //   Set spn:txt to 3:2
+  //   Use dot instead of group down arrow (typesetting issue)
   if (book) {
     document.getElementById("debugtext").hidden = false;
     debug = true;
@@ -1500,7 +1534,7 @@ function is_rpcpkt(d)  {return (msgrxbase <= ev(d)) && (ev(d) <= msgtxbase);}	//
 function is_rpcrxpkt(d)  {return (ev(d) == msgrxbase);}			// KUTRACE_RPCIDRXMSG 
 function is_rpctxpkt(d)  {return (ev(d) == msgtxbase);}			// KUTRACE_RPCIDTXMSG 
 function is_mwait(d)   {return (ev(d) == 0x0208);}			// KUTRACE_MWAIT
-function is_pstate(d)  {return (ev(d) == 0x209);}			// KUTRACE_PSTATE (frequency)
+function is_pstate(d)  {return (ev(d) == 0x209) || (ev(d) == 0x21C);}	// KUTRACE_PSTATE,PSTATE2 (frequency)
 function is_mark(d)    {return (0x020a <= ev(d)) && (ev(d) <= 0x020d);}	// KUTRACE_MARKA..KUTRACE_MARKD
 function is_lr_mark(d) {return (ev(d) & ~1) == 0x20E;}  		// KUTRACE_LEFTMARK and KUTRACE_RIGHTMARK
 function is_lock(d)    {return (0x0210 <= ev(d)) && (ev(d) <= 0x0212);}	// KUTRACE_LOCKNOACQUIRE..KUTRACE_LOCKWAKEUP
@@ -1529,7 +1563,7 @@ function is_kui(d) {return is_kernel(d) || is_user(d) || is_idle(d) || is_c_exit
 
 function is_bottom_half(d)  {return ev(d) == 0x5FF;}		// Overloads irqret 255
 // These can masquerade as kernel
-function is_sched_syscall(d) {return ev(d) == schedbase;} 	// Overloads syscall64 511 
+function is_sched_syscall(d) {return (ev(d) == schedbase) || (ev(d) == schedbase2);} 	// Overloads syscall64 511,1535 
 function is_rxtx(d) {return ev(d) == rxtxbase;}  	// overloads sysret32 510
 function is_ovhd(d) {return ev(d) == ovhdbase;}    	// overloads sysret32 511
 
@@ -1555,7 +1589,7 @@ function is_c_exit_ev(ev)  {return ev == 0x20000;}
 function is_special_ev(ev) {return (ev & 0xfffc0) == 0x00200;}
 function is_extra_ev(ev)   {return (ev & 0xfffc0) == 0x00280;}		// 280..2BF
 function is_mark_ev(ev)    {return (0x020A <= ev) && (ev <= 0x020D);}
-function is_pstate_ev(ev)  {return (ev == 0x209);}
+function is_pstate_ev(ev)  {return (ev == 0x209) || (ev == 0x21C);}
 function is_pc_samp_ev(ev) {return ((ev & ~1) == 0x280);}
 function is_lock_line_ev(ev) {return (ev == 0x282);}
 function is_wait_ev(ev)    {return (ev & 0xfffe0) == 0x00300;}			// 32 codes
@@ -1786,14 +1820,21 @@ function onscreen_x(d) {	// Allow slop
   return ((ts(d) <= realxrightmost) && (realxleft <= tsend(d)));
 }
 function startsonscreen_x(d) {	// Allow slop
+  // PC samples use end, not start
+  if (is_pc_samp(d)) {return ((tsend(d) <= realxrightmost) && (realxleft <= tsend(d)));}
   return ((ts(d) <= realxrightmost) && (realxleft <= ts(d)));
 }
 
 // Excludes right gray margin
-function strictly_onscreen_x(d) {	// Allow slop
+function strictly_onscreen_x(d) {	// No slop
+  // PC samples use end, not start
+  if (is_pc_samp(d)) {return ((tsend(d) <= realxright) && (realxleft <= tsend(d)));}
   return ((ts(d) <= realxright) && (realxleft <= tsend(d)));
 }
-function strictly_startsonscreen_x(d) {	// Allow slop
+
+function strictly_startsonscreen_x(d) {	// No slop
+  // PC samples use end, not start
+  if (is_pc_samp(d)) {return ((tsend(d) <= realxright) && (realxleft <= tsend(d)));}
   return ((ts(d) <= realxright) && (realxleft <= ts(d)));
 }
 
@@ -2107,6 +2148,7 @@ function draw_mark(row, d, x0, y0) {
 }
 
 // Annotate all CPU items on screen. Use sparingly at deep zoom only...
+// Skips mark, samp, arc, callout, rpcpkt
 //       row = getrow(d, prefixCpu);
 //       make min_ts per row
 function draw_annotateall() {
@@ -2129,10 +2171,13 @@ function draw_annotateall() {
   for (var i = 0; i < data.events.length; ++i) {
     var d = data.events[i];
     var gray = !eventHilite(i);
-    var skip = gray || dont_annotate[ev(d)] || is_mark(d) || is_pc_samp(d) || is_arc(d) || is_callout(d) || is_rpcpkt(d) || 
+    var skip = gray || dont_annotate[ev(d)] || is_mark(d) || is_pc_samp(d) || 
+      is_pstate(d) || is_arc(d) || is_callout(d) || is_rpcpkt(d) || 
       !strictly_startsonscreen_x(d) || !onscreen_all_y(d);
     if (skip) {continue;}
-    if (ignore_min_ts || (min_ts <= tsrel(d))) {
+    // PC samples use right end, not left
+    var tsrel_d = is_pc_samp(d) ? tsrelend(d) : tsrel(d);
+    if (ignore_min_ts || (min_ts <= tsrel_d)) {
       var short = true;
       var rotate = true;
       annotatespan(d, "first", short, -1, rotate);
@@ -2299,9 +2344,11 @@ function draw_arc(d, x0, y0, x1, y1) {
 
   // Suppress arcs that are a small fraction of the display window
   //  if the window width is greater than 5 milliseconds
+  //  if bold, show all arcs
+  var bold = (state2.arcs_value == 1);
   var short_span = ((right_x - left_x) < (region3width * arcfraction));
   var long_window = (xdomainwidth > 0.005);
-  if (short_span && long_window && !force_annot) {return;}
+  if (short_span && long_window && !force_annot && !bold) {return;}
 
   var left_y = y0;
   var right_y = y1;
@@ -2331,7 +2378,6 @@ function draw_arc(d, x0, y0, x1, y1) {
                      Rnd1(mid_y + ctl_rot.y) + "," +
                      Rnd1(right_x) + "," + Rnd1(right_y) + 
                  " l" + Rnd1(arrow_rot.x) + "," + Rnd1(arrow_rot.y);
-  var bold = (state2.arcs_value == 1);
   innersvgdotg.append("path")
     .attr("class", "graphlinex")
     .attr("d", arc_path)
@@ -2341,9 +2387,6 @@ function draw_arc(d, x0, y0, x1, y1) {
     .attr("stroke", bold ? "#0055AA" : "#0080FF");	// dark/light Blue-green
 //      .attr("stroke", "#AA00FF");
 }
-
-
-
 
 // Names for things...
 // Y-axis labels program.1234 kworker.10 etc.
@@ -2474,7 +2517,7 @@ function draw_callout(d) {
   var y0 = y1 + delta_row(d) * ypixpertrack * t_height1;
 
   var height =  Rnd0(perTracksize[t_height1].annotsize);
-  draw_bubble(d, x0, y0, x1, y1, height);
+  draw_bubble(d, x0, y0, x1, y1, height * 1.5);
   return;
 }
 
@@ -2607,37 +2650,28 @@ function draw_queue(d, x0, y0, x1, gray, height) {
 
 
 // Draw possible slow-clock overlay -- orange for performance caution
-// freq_value 0: off, 1: region3 overlay 2: gradient
+// freq_value 0: off, 1: bold 2: gradient
 // Clock frequency in arg0(d) is in MHz, so 2700 = 2.7 GHz
 function draw_pstate(d, x0, y0, x1, gray, height) {
   var samp_px = x1 - x0;
-  if (samp_px < 2) {return};	// Avoid short pixel clutter
 
   var freq = arg0(d);
   var opacity = 0.0;
   if (state2.freq_value == 0) {return;}
+  // Avoid short pixel clutter for normal overlay
+  // Always draw bold overlay even if tiny width
+  if ((samp_px < 2) && (state2.freq_value == 2)) {return};
+
+  var freq_fraction = Math.floor((freq - freq_min) / freq_divisor);  // 0..8
   if (state2.freq_value == 1) {
-    var freq_fraction = Math.floor((freq - freq_min) / freq_divisor);  // 0..8
-    opacity = freq_opacity_range[freq_fraction];
-    if (opacity < 0.2) {return;}	// Draw nothing unless at freq_min
-    // Draw nearly-transparent overlay of region 3 to indicate slow clock 
-    var pathps = "M" + Rnd5(x0) + "," + Rnd5(region234height / 2) + " H" + Rnd5(x1);
-    innersvgdotg.append("path")
-        .attr("class", "graphlinex")
-        .attr("d",  pathps)
-        .attr("fill", "none")
-        .attr("stroke-width", Rnd5(region234height))
-        .attr("stroke", freq_color_range[freq_fraction])	// red, slightly orange, green
-        .attr("stroke-opacity", 0.02);
-    return;
+    opacity = freq_bold_opacity_range[freq_fraction];
   }
   if (state2.freq_value == 2) {
-    var freq_fraction = Math.floor((freq - freq_min) / freq_divisor);  // 0..8
     opacity = freq_opacity_range[freq_fraction];
-    if (opacity == 0.0) {return;}	// Draw nothing if fully clear  near freq_max
   }
+  if (opacity == 0.0) {return;}	// Draw nothing if fully clear  
 
-  // Draw nearly-transparent overly to indicate slow clock
+  // Draw overlay to indicate slow clock
   var pathps = "M" + Rnd5(x0) + "," + Rnd5(y0) + " H" + Rnd5(x1);
   innersvgdotg.append("path")
       .attr("class", "graphlinex")
@@ -2661,8 +2695,9 @@ function draw_pc_samp(d, x0, y0, x1, gray, height) {
   // Put on pixel grid to make display sharper
   var pathpc = "M" + Rnd5(x0) + "," + Rnd5(y0 - 1) + " L" + Rnd5(x1) + "," + Rnd5(y0 - 6); 
   // Vertical tic
-  var pathpc2 = "M" + Rnd5(x1 - 1) + "," + Rnd5(y0 - 9 - height/2) + " L" + Rnd5(x1) + "," + Rnd5(y0 - 3 + height/2) + 
-    "L" + Rnd5(x1 + 1) + "," + Rnd5(y0 - 9 - height/2); 
+  var pathpc2 = "M" + Rnd5(x1 - 1) + "," + Rnd5(y0 - 9 - height/2) + 
+    " L" + Rnd5(x1) + "," + Rnd5(y0 - 3 + height/2) + 
+    " L" + Rnd5(x1 + 1) + "," + Rnd5(y0 - 9 - height/2); 
   innersvgdotg.append("path")
       .attr("class", "graphlinex")
       .attr("d",  pathpc)
@@ -2908,7 +2943,7 @@ function draw_c_exit(d, x0, y0, x1, gray, height) {
 }
 
 function draw_ovhd(d, x0, y0, x1, e_height) {
-  // Draw diagonal white lines to show overhead; 20ns if noipc, 50ns if IPC (approx measurements)
+  // Draw diagonal white lines to show overhead: ~20ns go, ~50ns goipc (RISC-V is more)
   var width = x1 - x0;
   // Avoid short pixel clutter
   if (width < 8) {return;}
@@ -3036,7 +3071,7 @@ function draw_idle(d, x0, y0, x1, gray, e_height) {
     }
 }
 
-// More to do...
+// More to do in refactoring...
 // This does all the actual drawing from pixel values within innersvgdotg.
 // All the tracks and decisions and combining have been factored out.
 function slowDrawOnRow2(d, x0, x1, y0, y1, e_height, textsize, gray, fade) {
@@ -3195,9 +3230,9 @@ function slowDrawOnRow(row, d, gray) {
   }
 
   // If less than 8 usec wide, Layer on top the overhead indication
-  if ((xdomainwidth < 0.000008) && (is_kernel(d) || is_user(d))) {
+  if ((xdomainwidth < gMinShowOvhd) && (is_kernel(d) || is_user(d))) {
     // Draw diagonal white lines to show overhead; 20ns if noipc, 50ns if IPC (approx measurements)
-    var ovhd = NsToTs((state2.ipc_value < 0) ? kOverheadNs : kOverheadIpcNs);
+    var ovhd = NsToTs((state2.ipc_value < 0) ? gOverheadNs : gOverheadIpcNs);
     var x2 = x_zoomed(ts(d) + ovhd);
     draw_ovhd(d, x0, y0, x2, e_height);
  }
@@ -3420,11 +3455,10 @@ function drawExtras() {
 //   else draw dur
 //
 // defer dur sum
-//   x  x   lg  fastdraw defer, zero it, retry: += dur
-//     0  x   sm  defer += dur
-//     0  x   lg  draw dur
-//
-//   x  x   sm  += dur
+//    x  x   lg  fastdraw defer, zero it, retry: += dur
+//    0  x   sm  defer += dur
+//    0  x   lg  draw dur
+//    x  x   sm  += dur
 //
 // The above for is_idle/is_cexit/user/is_kernel spans
 // marks:      20a..20d	space them at least xsecperpix*2 apart
@@ -3528,7 +3562,7 @@ function reset_globals_y(ytop, ybottom) {
 // Because of auto-pruning of Y-axis rows that cannot possibly overlap the X span
 // on screen, updating X will in general require also updating the Y-axis
 function do_zoomed_x2(arg_transform, arg_m) { 
-//console.log("do_zoomed_x2 ----------", arg_transform);
+//console.log("do_zoomed_x2 ----------", arg_transform, arg_m);
 //  if (ignore_zoom) {return;}
   // Pick up  the new transform and apply it
   state2.savedtransformX = arg_transform;
@@ -3559,13 +3593,6 @@ function do_zoomed_x2(arg_transform, arg_m) {
 
   redraw_events_axes();
 
-//  redrawEventsEtc();
-//  // Axes depend on calculateBasetime in redrawEventsEtc
-//  // Redraw the zoomed X-axis and grid
-//  redrawXaxis();
-//  // Redraw the pruned Y-axis
-//  redrawYlabels();
-
 //console.log("end do_zoomed_x ----------");
 }
 
@@ -3591,9 +3618,6 @@ function calcPixHeightsPerTrack(pixpertrack) {
   var minannot = Math.min(48, Math.max(6, 0.8 * textsize.smalltick));
   // Apply debug row count if forced
   var cur_tracks = maxTrack;
-////  if (0 < textsize.rows) {
-////    cur_tracks = rowToTrack[textsize.rows + 1] - rowToHeight[0];
-////  }
 
   for (var i = 0; i <= maxTrackHeight; ++i) {	// Note the <=, 0..20
     perTracksize[i] = {};
@@ -3692,11 +3716,6 @@ function do_zoomed_y() {
   state2.annotateuser_value = 0;
 
   redraw_events_axes();
-
-//  redrawEventsEtc();
-//  // Axes depend on calculateBasetime in redrawEventsEtc
-//  // Redraw the zoomed Y-axis
-//  redrawYlabels();
 
 //console.log("end do_zoomed_y ----------");
 }
@@ -3856,15 +3875,191 @@ function resetzoom() {
 //BUG
 
 
+// Zoom the X-axis to start at left, width width
+function ZoomToLeftWidth(xleft, xwidth) {
+//console.log("ZoomToLeftWidth", xleft, xwidth);
+  // Avoid zdiv if tinier than 10 nsec full screen width
+  if (xwidth < 0.000000010) {xwidth = 0.000000010;}
+
+  // Calculate new scale based on desired width vs. scale=1.0 width
+  // x is a function that maps times to pixels:
+  //   x.domain([dataTsLo, dataTsHi]);
+  //   x.range([axesmargin, region3width - axesmargin])
+  //   state2.savedtransformX = d3.zoomIdentity;
+  //   x_zoomed = state2.savedtransformX.rescaleX(x);
+  // When we zoom in,
+  //   the scale k: gets larger, so that tslo + e maps to axesmargin + k * e
+  // When we pan by dragging left,
+  //   the offset x: in pixels gets more negative
+  // x w/identity tslo => axesmargin : (ts - tslo) * xxx + pixlo 
+  //   where xxx = (pixhi - pixlo) / (tshi - tslo) 
+  // x w/zoom tslo => axesmargin : (ts - tslo) * xxx * k - x + pixlo 
+  //   where xxx = (pixhi - pixlo) / (tshi - tslo) 
+  // so if new time width is W smalleer than initial, scale k is  (tshi - tslo) / W
+  // For scale 1, putting TS at left edge means pix offset of
+  //   - (TS - tslo) * xxx 
+  // For scale 2, putting TS at left edge means pix offset of
+  //   - (TS - tslo) * xxx * 2
+  // var new_xk = full_ts_width / new_ts_width;
+  // var new_xx = -(ts - tslo) * new_xk mapped to pix : * full_pix_width / full_ts_width;
+  //
+  // The D3 base mapping maps to 0 not pix0 (e.g. 5):
+  // So the calculation is tslo * mul - offset to get to 5. offset = tslo*mul - 5
+  //                       tslo * mul * k - offset to get to 5     = tslo*mul*k - 5
+  // so difference is 5*(k-1)
+  
+  var px0 = x.range()[0];
+  var px1 = x.range()[1];
+  var ts0 = x.domain()[0];
+  var ts1 = x.domain()[1];
+  var full_pix_width = px1 - px0;
+  var full_ts_width = ts1 - ts0;
+  var mul = full_pix_width / full_ts_width;
+  //console.log("px0/1 ts0/1", px0, px1,  ts0, ts1);
+  //console.log("full_pix full_ts", full_pix_width, full_ts_width, mul);
  
+
+  var new_xk = full_ts_width / xwidth;
+  var new_xx = -(xleft - ts0) * new_xk * mul;
+  new_xx -= px0 * (new_xk - 1);			// 5*(k-1)
+  var new_xy = state2.savedtransformX.y;	// Unchanged
+//console.log("k: x: y:", new_xk, new_xx, new_xy);
+  // These reset the transformations to identity, overwriting 
+  // savedtransformX/Y, which cannot easily be assigned because 
+  // they are functions, not just simple variables.
+  state2.savedtransformX = d3.zoomIdentity.translate(new_xx, new_xy).scale(new_xk);
+
+  // These are needed to have the restored transforms stick
+  panzoomrect_x.call(myZoom_x.transform, state2.savedtransformX);
+  panzoomrect_x.call(myZoom_x);
+  
+  delayed_redraw_events_axes();
+}
+
+const OneTwoFive = 
+  [400, 200, 100, 40, 20, 10, 4, 2,  1,  0.4, 0.2, 0.1, 0.04, 0.02, 0.01, 0.004, 0.002];
+  
+// Expecting something like 59:33.123-- or 33.9
+// With respect to something like base time of 17:59:00
+// Seek to center the display on target time, width based
+// on +/-5 in last fraction digit and 1/2/5 zoom in/out
+function SeekTime(needle) {
+  //console.log("SeekTime", needle);
+  var colon_pos = needle.search(/:/);
+  var period_pos = needle.search(/\./);
+  var suffix_pos = needle.search(/\+|\-/);
+  if (suffix_pos < 0) {suffix_pos = needle.length;}
+  //console.log("  ", colon_pos, period_pos, suffix_pos);
+  // Check for valid
+  if (period_pos < 0) {return;}
+
+  // We want target center time to be seconds from dataBaseSecond
+  var target = 0;
+  // Minutes
+  if (colon_pos > 0) {
+    // We want the user-supplied minute to be >= dataBaseSecond minute
+    var base_minute = Math.floor(dataBaseSecond / 60) % 60;
+    var needle_minute = +needle.substr(0, colon_pos);
+    if (needle_minute < base_minute) {return;}
+    target += (needle_minute - base_minute) * 60;
+    //console.log("  target:", target);
+  }
+  // Seconds
+  target += +needle.substr(colon_pos + 1, suffix_pos - colon_pos - 1);
+  //console.log("  target", target, dataBaseSecond);
+  
+  // We want the width on each side of the center to be +/- 5 in the last digit
+  // adjusted up/down from there
+  var fraction_digits = suffix_pos - period_pos - 1;
+  var sidewidth = Math.pow(10, -fraction_digits) * 5;
+  // Accumulate suffix adjustment
+  var plusminus = 0;
+  for (var i = suffix_pos; i < needle.length; ++i) {
+    if (needle[i] == '+') {++plusminus;}
+    if (needle[i] == '-') {--plusminus;}
+  }
+
+  plusminus = Math.max(-8, Math.min(plusminus, 8));
+  sidewidth *= OneTwoFive[plusminus + 8];
+  //console.log("  sidewidth", sidewidth);
+  
+  // Change the zoom to cover the x-axis range
+  //   target - sidewidth * 1.025 to target + sidewidth * 1.025
+  // The extra 2.5% on each side makes the endpoint labels visible
+  sidewidth *= 1.025;
+  ZoomToLeftWidth(target - sidewidth, 2 * sidewidth);
+}
+ 
+ const ten_nsec = 0.000000010;
+
+// Convert the current position and width into the nearest encompassing
+// value for SeekTime
+function SeekCurrent(needle) {
+  //console.log("SeekCurrent", needle);
+  // take current width and round up to 1/2/5
+  var ts_half_width = (realxright - realxleft) / 2;
+  var center = realxleft + ts_half_width;
+  
+  var atleast = ten_nsec;	// There will be 2.5% slop on both ends in SeekTime
+  var i;			// Round up here to 3% to make multiple @@'s stable
+  for (i = 0; i < 8; ++i) {
+    if (ts_half_width <= atleast * 5 * 1.03) {break;}
+    atleast *= 10;
+  }
+  // Now have atleast*5 = 50ns 500  5us 50 500  5ms 50 500 
+  var fraction_digits = 8 - i;
+  var sidewidth = atleast * 5;
+  var suffix = "";
+  if (ts_half_width <= atleast * 2 * 1.03) {
+    sidewidth = atleast * 2;
+    suffix = "+";
+  }
+  if (ts_half_width <= atleast * 1.03) {
+    sidewidth = atleast;
+    suffix = "++";
+  }
+  if (fraction_digits == 0) {
+    fraction_digits = 1;
+    suffix += "---"
+  }
+
+  //console.log ("ts_half_width", center, ts_half_width, "<= sidewidth", sidewidth, suffix);
+  var seektarget = center.toFixed(fraction_digits) + suffix;
+  //console.log("SeekCurrent=", seektarget);
+  state2.search_text = seektarget;
+  resetText(document.getElementById("SearchText"), seektarget);
+  // Go there
+  SeekTime(seektarget);
+}
+
+//
 // Annotate all items on whose name contains search string and 
 // whose duration dur is mindur <= dur <= maxdur. 
+// Or if search is a time, seek to that time
+//  18:40.123 seeks to minute 18:40.123, with width 5 msec on each side
+//  18:40.1234 seeks to minute 18:40.1234, with width 500 usec on each side
+//  18:40.1234+ seeks to minute 18:40.1234, with 200 usec on each side
+//  40.12-- seeks to second 40.12, with width not 50 msec but 200 msec on each side
+//    Minute is optional. Use values above 60 as needed across an hour boundary.
+//    Initial width is +/- 1 in the last fraction digit, minimum one digit
+//    Multiple + or - suffixes change widths in 1/2/5 pattern, + zooming in, - out
+//  @@ seeks close to the current time, with normalized width
+//
 function annotatesearch2(needle, mindur, maxdur) {
 //console.log("annotatesearch2", needle, mindur, maxdur);
   // Remove any previous lines
   resetlines();
   document.getElementById("matchcount").innerHTML = "";
 
+  if (needle.search(/^(\d\d?:)?\d\d?\.[0-9]+(\+|\-)*$/) >= 0) {
+    SeekTime(needle); 
+    return;
+  }
+  if (needle.search(/^@@$/) >= 0) { 
+    SeekCurrent(needle); 
+    return;
+  }
+  
   // Ignore 1-char searches with zero durations -- too many matches
   if (!IsActiveText(needle) && !IsActiveNumber(mindur) && !IsActiveNumber(maxdur)) {return;} 
 
@@ -3880,7 +4075,7 @@ function annotatesearch2(needle, mindur, maxdur) {
 
   resetRotatingLabelk();
 
-  // Draw all matching lines
+  // Draw all matching annotation lines
   var min_ts = 0;	// Highwater mark for drawing only one per xsecperpix
   InitMatchcount();
   if (data == null) {return;}
@@ -3896,11 +4091,16 @@ function annotatesearch2(needle, mindur, maxdur) {
       // Invert search match if state2.searchnot_value = true
       if (hit != state2.searchnot_value) {
         // Draw if not on top of previous
-        if (min_ts <= tsrel(d)) {
+        // PC samples use right end, not left
+        var tsrel_d = is_pc_samp(d) ? tsrelend(d) : tsrel(d);
+        if (min_ts <= tsrel_d) {
           var short = true;
           var rotate = true;
           annotatespan(d, "first", short, -1, rotate);
-          min_ts = tsrel(d) + xsecperpix;
+          // Track duplicate x-positions if not presorted
+          if (!RowsArePresorted()) {
+            min_ts = tsrel(d) + xsecperpix;
+          }
           state.annotated_d.push(i);
           if(state2.annotated_one_d == -1) {state2.annotated_one_d = i;}  // Keep first
         }
@@ -3922,14 +4122,14 @@ function annotatesearch2(needle, mindur, maxdur) {
 function LinearFindNearestEvent(events, t, row, rr, hilo_click) {
 //console.log("LinearFindNearestEvent", hilo_click);
   var pc_only = (0 < state2.samp_value) && (hilo_click == 1);
-  var lock_only = (0 < state2.lock_value) && (hilo_click == -1);
+  var lock_only = (0 < state2.lock_value) && (hilo_click == 1);
+  var freq_only = (0 < state2.freq_value) && (hilo_click == -1);
   var nearest = -1;
   var nearestdist = 0;
   for (i = 0; i < events.length; ++i) {
     var d = data.events[i];
     if (t < ts(d)) {continue;}
-    if (is_pstate(d) && (state2.freq_value <= 0)) {continue;}
-
+    if (is_pstate(d) != freq_only) {continue;}
     if (is_pc_samp(d) != pc_only) {continue;}
     if (is_lock_line(d) != lock_only) {continue;}
     // If nested locks, pick first one that reaches t
@@ -3956,8 +4156,8 @@ function LinearFindNearestEvent(events, t, row, rr, hilo_click) {
 // d3.event.stopPropagation()
  
 // To snap to nearest point, we have mouse point x,y scaled to data units and data array.
-// Taking advantage of data being sorted by x value, we use bisect (binary search) to find a nearby point
-// Then refine based on two nearby points to see closest x** + y**2. 
+// Taking advantage of data being sorted by x value, we use bisect (binary search) to 
+// find a nearby point, then refine based on two nearby points to see closest x**2 + y**2. 
 // THIS: Or not bother and just use closest x. Snap x1y1 or x2y2 to that point.
 // Consider not snapping if too far away.
  
@@ -4017,14 +4217,16 @@ function doSnap_x(x, row, rr, hilo_click) {
   // desired row. Find pc_samp or lock_line if enabled and hilo_click matches
   // We want the subscript of the entry d such that it is in row and
   //  ts(d) <= t
-  // For overlapping timespans, we actually prefer one that includes the clicked time t, i.e. d such that
-  //  ts(d) <= t <= tsend(d)
+  // For overlapping timespans, we actually prefer one that includes the clicked 
+  //  time t, i.e. d such that ts(d) <= t <= tsend(d)
   var pc_only = (0 < state2.samp_value) && (hilo_click == 1);
   var lock_only = (0 < state2.lock_value) && (hilo_click == 1);
+  var freq_only = (0 < state2.freq_value) && (hilo_click == -1);
   var lo_i, hi_i;
   for (lo_i = i - 1; 0 <= lo_i; --lo_i) {
 //console.log("        (", x, ",", row, ") = ", lo_i, data.events[lo_i]);
     var d = data.events[lo_i];
+    if (is_pstate(d) != freq_only) {continue;}
     if (is_pc_samp(d) != pc_only) {continue;}
     if (is_lock_line(d) != lock_only) {continue;}
     // Added 2021.04.22, might not be right yet. 
@@ -4203,7 +4405,7 @@ function RowBot(row) {
   var rowheight = rowToHeight[row];	// In tracks
   var eventheight_px = perTracksize[rowheight].eventheight;	// In pixels
   var eventheight_trk = Rnd0(eventheight_px / ypixpertrack);
-  return toptrack + eventheight_trk;
+  return toptrack + eventheight_trk;	// Back to tracks
 }
 
 
@@ -4251,12 +4453,13 @@ const errno_name = [
 function fullname(d, short) {
   var fulltext;
   var arg = arg0(d);
-  var add_arg = !(is_rpc(d) | is_lock(d) | is_pkt(d) | is_userrxtx(d) | is_enq_deq(d));
+  var add_arg = !(is_rpc(d) | is_lock(d) | is_pkt(d) | is_userrxtx(d) | is_enq_deq(d) | is_mark(d));
+  if (is_pstate(d) && (name(d).indexOf('_') >= 0)) {add_arg = false;}
   if (short) {
-    // Short form is name truncated to 8 chars, plus any (non-zero) arg
+    // Short form is name truncated to 9 chars, plus any (non-zero) arg
     fulltext = name(d);
-    if (name(d).length > 8) {
-      fulltext = name(d).substr(0, 6) + "~" + name(d).substr(name(d).length - 1, 1);
+    if (name(d).length > 9) {
+      fulltext = name(d).substr(0, 7) + "~" + name(d).substr(name(d).length - 1, 1);
     }
     if (is_special(d) || is_irq(d)) {
       if (add_arg && (arg != 0)) {
@@ -4355,9 +4558,11 @@ function draw_one_annot(d, vx, vy,  liney, linedy,  dotsy, dotsdy,  fulltext, an
 function annotatespan(d, clss, short, my, rotate) {
 //console.log("annotatespan", d, clss, short, rotate);
   if (state2.annottype_value) {
+    // Short one-line annot
     rubberband = innersvgdotg.append("path")	// Placeholder objects
         .attr("class", "verticalshortline " + clss);
   } else {
+    // Tall two-line annot
     rubberband = innersvgdotg.append("path")	// Placeholder objects
         .attr("class", "verticalline " + clss);
     rubberband2 = innersvgdotg.append("path")	// Placeholder objects
@@ -4366,14 +4571,17 @@ function annotatespan(d, clss, short, my, rotate) {
 
     // Pixel x-position for start of event
     var vx = x_zoomed(ts(d));	// time to pixel
-    if (vx < 3) {vx = 3;}	// If off to the left, put onscreen
+    var vx_ret = vx;
+    if (is_pc_samp(d)) {vx = x_zoomed(tsend(d)) - 3;} 	// Near the sample, right end
+    if (vx < 3) {vx = 3;}				// If off to the left, put onscreen
+    if (region3width < vx) {return vx_ret;}		// If off to the right,skip
     
     // Working toward pixel y-position via row
     var row;
     if (my < 0) {
       // No incoming click; find cpu/pid/rpc row that is onscreen and non-zero height
       row = getfirstrow(d);
-      if (row < 0) {return vx;}	// no such row
+      if (row < 0) {return vx_ret;}	// no such row
     } else {
       // Incoming click; find nearest row
       row = doSnap_y(my);
@@ -4383,13 +4591,13 @@ function annotatespan(d, clss, short, my, rotate) {
 
     var rowheight = rowToHeight[row];
     var rowtrack = rowToTrack[row];
-    if (rowheight == 0) {return;}
+    if (rowheight == 0) {return vx_ret;}
 
     var maxannot = perTracksize[rowheight].annotcount;
-    if (maxannot <= 0) {return;}
-
+    if (maxannot <= 0) {return vx_ret;}
+ 
     var annotheight = perTracksize[rowheight].annotsize;
-    if (annotheight <= 0) {return;}
+    if (annotheight <= 0) {return vx_ret;}
 
     var y0 = y_zoomed(rowToTrack[row]);
     var vy = y0 + perTracksize[rowheight].annotoffset + 
@@ -4459,7 +4667,7 @@ function annotatespan(d, clss, short, my, rotate) {
     rubberband2.attr("d", path2);
   }
 
-    return vx;
+    return vx_ret;
 }
  
 // If mouse is in Region2, go affect Y, else we are in Region3 and affecting X
@@ -4503,7 +4711,7 @@ function mousedown_x() {
     var dy1 = y_zoomed.invert(my1);	// track
 //console.log("mousedown_x at", dx1, dy1, "realxleft", realxleft);
 
-    // Find nearest data object
+    // Find nearest data object, use hilo
     var i = FindNearestEvent(mx1, my1, true); 
     if (i < 0) {return;}
 
@@ -4558,7 +4766,7 @@ function mousemove_x() {
 //    var dy2 = y_zoomed.invert(my2);
 //console.log("mousemove at", dx2, dy2);
 
-    // Find nearest data object
+    // Find nearest data object, use hilo
     var i = FindNearestEvent(mx2, my2, true); 
     if (i < 0) {return;}
 
@@ -4750,7 +4958,7 @@ function spikemove(d) {
   var deltaY = my3 - my1;		// in px
 //console.log("  ", mx1, my1, mx2, my2, mx3, my3, deltaX, deltaY);
 
-  // Find nearest data object to our drag point
+  // Find nearest data object to our drag point, no use of hilo
   var i = FindNearestEvent(mx3, my3, false); 
   if (i < 0) {return;}
 
@@ -4870,7 +5078,7 @@ function setEventHilites(hilite_row, newhilite) {
 
 // m has mouse pixel coordinates [x,y]
 function mousedown_y(m) {
-//console.log("mousedown_y");
+//console.log("mousedown_y", d3.event.button);
   // If not shiftKey, pass it on
   if (!d3.event.shiftKey) {
     return;
@@ -4883,21 +5091,23 @@ function mousedown_y(m) {
 //console.log("  hilite_row", hilite_row, sortName[hilite_row], state2.rowToHilite[hilite_row]);
   var newhilite = state2.rowToHilite[hilite_row] ^ 1;
   
+  // Shift-click highlights one row
   // Shift-RIGHT-click highlights all rows with matching name prefix
-  var matchlen = sortName[hilite_row].length;	// Exact match
-  if (0 < d3.event.button) {
-    // Find first non-leter/digit/underscore/hyphen
+  if (0 == d3.event.button) {
+     state2.rowToHilite[hilite_row] = newhilite;
+  } else {
+    var matchlen = sortName[hilite_row].length;	// Exact match
     var prefixlen = sortName[hilite_row].search("[^a-zA-Z0-9_-]");
     if (0 < prefixlen) {matchlen = prefixlen;}
-  }
-  var prefix = sortName[hilite_row].substr(0, matchlen);
-  // Update all matching rows
-//console.log("  prefix=", sortName[hilite_row], matchlen, prefix);
-  for (var row = 0; row < sortNumSize; ++row) {
-    if (sortName[row].startsWith(prefix)) {
-      state2.rowToHilite[row] = newhilite;
+    var prefix = sortName[hilite_row].substr(0, matchlen);
+    // Update all matching rows
+    for (var row = 0; row < sortNumSize; ++row) {
+      if (sortName[row].startsWith(prefix)) {
+        state2.rowToHilite[row] = newhilite;
+      }
     }
   }
+  
   // Now highlight all the events in currently-highlighted rows
   RecalcEventHilites();		// from rowToHilite
   RecalcGroupHilites();		// from rowToHilite
@@ -5323,19 +5533,7 @@ function draw_initial_yaxis() {
     .attr("class", "tick noselect")
     .attr("className", "tick noselect")
     .style("font-size", textsize.smalltick + "px");
-
-  // Text label for the entire Y axis
-//  svgdotg.append("text")
-//      .attr("transform", "rotate(-90)")
-//      .attr("class", "axis-text noselect")
-//      .attr("font-size", (textsize.label) + "px")
-//      .style("fill", "blue")
-//      .attr("y", 0 - region2width)
-//      .attr("x", 0 - (region234height / 2))
-//      .attr("dy", "0.9em")
-//      .style("text-anchor", "middle")
-//      .text(data.axisLabelY);   
-}
+ }
 
 // Redraw the zoomed X-axis and grid
 function redrawXaxis() {
@@ -5455,16 +5653,6 @@ function redrawYlabels() {
   d3.selectAll("#labeltext3").remove();
   d3.selectAll(".labeltick").remove();
 
-  // Y-axis line
-//  var path1 = "M" + Rnd1(region2width - 0.5) + "," + (axesmargin) + " h-4 h4" +
-//             " v" + (region234height - 2 * axesmargin) +
-//             " h-12 h12";
-//  region2dotg.append("path")
-//    .attr("class", "labeltick")
-//    .attr("d",  path1)
-//    .attr("stroke-width", "1")	
-//    .attr("stroke", "#000000");		// black
-
   // The labels
   next_ylabel_y0 = 0;
   for (var row = 0; row < sortNumSize; ++row) {
@@ -5562,7 +5750,7 @@ function redrawEvents() {
 }
 
 
-// Called when starting all over with new window size
+//// Called when starting all over with new window size
 // Outer and inner SVGs exist but are empty
 //
 // Order of drawing:
@@ -5584,6 +5772,7 @@ function redrawEvents() {
 // Remove and reset annotations, calc X and Y scaling, draw events, draw IPC legend
 // Set up x zoom and call resetonscreen_x before calling this
 // Do this before drawing axes, which depend on calculateBasetime
+//
 function redrawEventsEtc() {
   //console.log("redrawEventsEtc", data.events.length, "events");
 
@@ -5607,7 +5796,7 @@ function redrawEventsEtc() {
     var d = data.events[state2.annotated_one_d];
     if (startsonscreen_x(d)) {
       var short = false;
-      var rotate = false;
+      var rotate = true;
       // Force full name even if using simple annots
       var temp = state2.annottype_value;
       state2.annottype_value = 0;
@@ -5709,14 +5898,6 @@ console.log("=== basictextsize", basictextsize);
   }
   textsize.region2chars = region2chars;
 
-  // If the x-axis doesn't have room for 10 numbers at 6 digits each, reduce the nice value
-  // If xnice would be < 4, first reduce the basictext size by 33%
-  //textsize.xnice = 10;
-////  if (region3width < 4 * (6 * basictextsize * 0.5)) {
-////    basictextsize = Rnd0(basictextsize * 0.67);
-////console.log("    new basictextsize", basictextsize);
-////  }
-
   // Allow some slop room for labels and timelines to hang out into region4
   region3clipwidth = region3width + (region4width / 2); 
   // region5width = svgWidth;
@@ -5724,7 +5905,7 @@ console.log("    region 1 234 5 heights(px) =", region1height, region234height, 
 console.log("    region 2 3 4 widths(px) =", region2width, region3width, region4width);
 }
 
-//
+
 // Try basing everything on the X-axis text size, approx 4% of total height
 // but min 12px max 30px
 // Region5 gets room for 2 lines of X-axis numbers plus label plus 
@@ -6011,6 +6192,8 @@ function redrawUI() {
   resetNum(document.getElementById("SearchMax"), state2.usec_hi_time);
 
   document.getElementById("matchcount").innerHTML = "";
+  document.getElementById("showversion").innerHTML = script_edit_date;
+
 
   ////decorate_annottype();
   document.getElementById("annottype").innerHTML = annottype_name[state2.annottype_value];
@@ -6020,7 +6203,7 @@ function redrawUI() {
   decorateButton4(document.getElementById("showmarks"), state2.marks_value);
   decorateButton3(document.getElementById("showarcs"), state2.arcs_value);
   decorateButton3(document.getElementById("showlock"), state2.lock_value);
-  decorateButton(document.getElementById("showfreq"), state2.freq_value);
+  decorateButton3(document.getElementById("showfreq"), state2.freq_value);
 
   decorateButton4(document.getElementById("showipc"), state2.ipc_value);
   decorateButton(document.getElementById("showsamp"), state2.samp_value);
@@ -6130,7 +6313,7 @@ function doToggleWaits(e) {
 }
 
 function doToggleFreq(e) {
-  state2.freq_value = doToggle(e.shiftKey, state2.freq_value, freq_value_max);
+  state2.freq_value = doToggle(true, state2.freq_value, freq_value_max);
   redrawUI();
   redrawEvents();
 }
@@ -6464,7 +6647,8 @@ function DoRestore(n) {
     // Restore text about x/y start and width
     document.getElementById("xstartwidth").innerHTML =  
       RndUsec(state2.xleft_ts) + "+" + Rnd0(RndUsec(state2.xright_ts - state2.xleft_ts) * 1000000);
-    document.getElementById("ystartwidth").innerHTML =  (state2.ytop_track) + "+" + (state2.ybot_track - state2.ytop_track);
+    document.getElementById("ystartwidth").innerHTML =  
+      (state2.ytop_track) + "+" + (state2.ybot_track - state2.ytop_track);
 }
 
 function doSaveRestore(shifted, n) {
@@ -7013,16 +7197,14 @@ console.log("localStorageKey", localStorageKey);
 
 /***
 Sets in state:
-traceid
-randomid
-
+  traceid
+  randomid
 
 Sets in state2:
 
 Sets outside of state:
-dataBaseDate
-dataBaseSecond
-
+  dataBaseDate
+  dataBaseSecond
 ***/
 
 
@@ -7098,6 +7280,16 @@ function newdata2(data2) {
   // Grab the IPC flag; ipc_value=-1 means no IPC data available
   state2.ipc_value = 0;
   if ((data.flags & 128) == 0) {state2.ipc_value = -1;}
+  
+    // Remember if this is from a high-overhead RISC-V CPU
+  is_riscv = false;
+  if ((typeof data.cpuModelName !== 'undefined') && 
+      (data.cpuModelName.search("u74-mc") >= 0)) {
+    is_riscv = true;
+    gOverheadNs    = kRVOverheadNs;	  // Approximate KUtrace overhead for one event
+    gOverheadIpcNs = kRVOverheadIpcNs;// Approximate KUtrace overhead for one event with IPC recording
+    gMinShowOvhd   = kRVMinShowOvhd;  // Always show overhead if width lt this (seconds)
+  }
  
   // Set the flags; *_value=-1 means no items available
   if (!has_pc_samples) {state2.samp_value = -1;}
@@ -7125,7 +7317,7 @@ function newdata2_resize(data2) {
   resizeWindowEtc();
 }
  
-// Want at least two characters for active searchng
+// Want at least one character for active searchng
 function IsActiveText(t) {
   return t.length >= 1;
 }
@@ -7156,23 +7348,112 @@ function keyupAspect(e) {
   return;
 }
 
+function removeShowSearchList() {
+  var ssl = document.getElementById("ShowSearchList");
+  if ((typeof ssl !== 'undefined') && (ssl !== null)) {
+    ssl.parentNode.removeChild(ssl);
+  }
+}
 
-function keyupSearch(e) {
-  // Setting your input text to the global Javascript Variable for every key press
-  var inputTextValue = e.target.value;
-  state2.search_text = inputTextValue;
+function removeFromList(str) {
+  for (i = 0; i < searchlist.length; ++i) {
+    if (searchlist[i] == str) {
+      // Move up later elements and shrink
+      for (j = i+1; j < searchlist.length; ++j) {searchlist[j-1] = searchlist[j];}
+      searchlist.length -= 1;
+      break;
+    }
+  }
+  // Not found -- no change
+}
 
+function doSearch(inputTextValue) {
   // Turn off annotateall/user when search is active
   state2.annotateall_value = 0;
   state2.annotateuser_value = 0;
 
-  if (IsActiveText(inputTextValue)) {e.target.style.backgroundColor = kActiveBackColor;}
-  else                              {e.target.style.backgroundColor = kInactiveBackColor;}
- 
   annotatesearch2(document.getElementById("SearchText").value, 
                   document.getElementById("SearchMin").value,
                   document.getElementById("SearchMax").value);
-  return;
+}
+
+function frontOfList(str) {
+  searchlist.unshift(str);
+}
+
+// Add/move string to front of searchlist
+function updateSearchList(str) {
+  if (str.length == 0) {return;}
+  removeFromList(str);
+  frontOfList(str);
+  if (searchlistMax < searchlist.length) {
+    searchlist.length = searchlistMax;
+  }
+//console.log(searchlist);
+}
+
+// Set search box to selected ShowSearchList element, update list, do search
+function searchlistClick(e) {
+  var str = e.target.innerText;
+  document.getElementById("SearchText").value = str;
+  state2.search_text = str;
+  updateSearchList(str);
+  removeShowSearchList();
+  doSearch(str);
+}
+
+
+// Maintain a list of recent search strings, displaying while typing search text
+function maintainSearchList(keycode) {
+  var str = document.getElementById("SearchText").value;
+  // Remove prompts
+  removeShowSearchList();
+  if (str.length == 0) {
+    // Empty search box
+    return;
+  }
+  // <CR> adds search box contents to the list
+  if (keycode == CR) {
+    // Add/move this entry to front of searchlist
+    updateSearchList(str);
+  } else {
+    // Recreate prompt list and show it
+    var box = document.getElementById("SearchTable");
+    ssl = document.createElement("div");
+    ssl.setAttribute("id", "ShowSearchList");
+    ssl.setAttribute("style", "position:absolute; left:2px; width:150px; top:125%; z-index:1;");
+//console.log("append1", box, ssl);
+    box.appendChild(ssl);
+    var dispcount = 0;
+    for (i = 0; i < searchlist.length; ++i) {
+      if (0 <= searchlist[i].indexOf(str)) {
+        var b = document.createElement("div");
+        b.innerHTML = searchlist[i];
+        //b.setAttribute("value", i.toString());
+        //b.setAttribute("style", "background-color:#EEEEFF; width:100%;");
+        b.setAttribute("style", "background:#EEEEFF; width:100%;");
+        b.addEventListener("click", searchlistClick);
+//console.log("append2", box, a);
+        ssl.appendChild(b);
+        ++dispcount;
+        if (searchlistMaxDisplay <= dispcount) {break;}
+      }
+    }
+  }
+
+}
+
+function keyupSearch(e) {
+  var keycode = e.keyCode;
+  // Maintain a list of recent search strings
+  maintainSearchList(keycode);
+
+  // Setting the input text to the global Javascript Variable for every key press
+  var inputTextValue = e.target.value;
+  state2.search_text = inputTextValue;
+  if (IsActiveText(inputTextValue)) {e.target.style.backgroundColor = kActiveBackColor;}
+  else                              {e.target.style.backgroundColor = kInactiveBackColor;}
+  doSearch(inputTextValue);
 }
 
 function keyupSearchMin(e) {
@@ -7269,7 +7550,7 @@ function keyupDebugTxt(e) {
 
 <!-- selfcontained2 -->
 
-// ---------- OVerall HTML legend ----------
+// ---------- OVerall HTML legend ----------------------------------------
 // Constants for overall legend at 150px per inch
 const OVconstH = {
   width : 900,
@@ -7972,7 +8253,7 @@ function DrawOverallLegendV() {
   OV6();
 }
 
-// ---------- End OVerall HTML legend ----------
+// ---------- End OVerall HTML legend ----------------------------------------
 
 
 // Re-allocate outer SVG as function of browser window, and 
@@ -8163,13 +8444,15 @@ function unloadSaveState() {
 <button id="showsamp"  style="border-radius:6px";>Samp</button>
 <button id="showcb"  style="border-radius:6px";>CB</button>
 
-<!-- pencil -->
-<!-- <button id="AddAnnot"  style="border-radius:6px; font-weight:bold">&#x270e</button> -->
-
 &nbsp;&nbsp;&nbsp;Search: 
-<button id="searchnot"; style="background-color:#FFFFFF; color:#808080; borderColor:#C0C0C0; border-radius:6px";>!</button>
+<button id="searchnot"; 
+ style="background-color:#FFFFFF; color:#808080; borderColor:#C0C0C0; border-radius:6px";
+ >!</button>
 
-<input name="SearchText" type="text" maxlength="256" id="SearchText" class="Searchtext" onkeyup="keyupSearch(event)" style="width: 150px; background-color:#FFFFFF"/> 
+  <span id="SearchTable" style="position:relative; style="width: 150px;">
+    <input name="SearchText" type="text" maxlength="100" id="SearchText" class="Searchtext" 
+     onkeyup="keyupSearch(event)" style="width: 150px; background-color:#FFFFFF"/> 
+  </span>
 
 <span id="minmax_units" style="font-weight:bold; color:blue">usec:</span>
 
@@ -8225,6 +8508,8 @@ x:
 &nbsp;
 y:
 <span id="ystartwidth" style="font-family: sans-serif; font-size: 10pt"></span>
+&nbsp;
+<span id="showversion" style="font-family: sans-serif; font-size: 10pt"></span>
 
 
 <br>
@@ -8255,7 +8540,7 @@ y:
 
 <!-- Small and large UI hints -->
 <span style="font-family:sans-serif; font-size:12px; color:black">
-  Shift-click 1-5 to save, click to restore. Axes: scroll wheel to zoom, 
+  Shift-click 1-4 to save, click to restore. Axes: scroll wheel to zoom, 
   drag to pan. Items: shift-click-unclick to annotate. 
   Shift-click-unshift to keep, shift-drag to measure. 
   Red dot resets. 
@@ -8289,13 +8574,10 @@ y:
 
      Mark mark_x events	 	 off/both/text/numbers
      Arc  wakeup arcs		 off/on
-     Wait Reasons for not exec.	 off/on  Always on now
+     Lock lock-held lines	 off/on
      Slow CPU clock freq	 off/gradient
-
      IPC  instructions per cycle off/both/user/kernel
      Samp PC samples		 off/on
-     ovhd Approx.overhead times	 off/on  Always on now
-     Lock lock-held lines	 off/on
      CB   color blind colors	 off/on
 
      Search:    regex string match 
