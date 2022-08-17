@@ -13,7 +13,13 @@
 .B samptoname_k
 .B samptoname_u
 .B spantoprof
+.B unmakeself
+.B checktrace
 .B kuod
+
+.B from_base40
+.B kutrace_lib
+.B time_getpid
 .fi
 .\"
 .SH DESCRIPTION
@@ -33,7 +39,6 @@ cat foo.trace |./rawtoevent |sort \-n |./eventtospan3 "my title" \\
     <insert any of the other programs here as additional filters>
 cat foo.json |./makeself show_cpu.html >foo.html
 .fi
-
 .\"
 .SH PROGRAMS
 .TP
@@ -98,7 +103,8 @@ It embeds the input JSON as a large string into the specified HTML wrapper, alon
 a copy of the d3.v4.min.js JavaScript library. 
 The HTML wrapper implements a substantial user 
 interface for displaying timelines, panning and zooming, and selecting which information
-to display.
+to display. For KUtrace, this wrapper is \fBshow_cpu.html\fR. 
+(In the book, other templates are used for disk traces and RPC traces.)
 .nf
 \fBNote:\fR d3.v4.min.js must be in the same directory as \fBmakeself\fR.
 .fi
@@ -112,7 +118,7 @@ This makes the HTML file about 200KB smaller, but it depends on internet access 
 .\"
 .TP
 \fBspantospan\fR \fIgranularity-usec\fR 
-The \fBspantospan\fR program reads a byte-sorted JSON file from sysin 
+The \fBspantospan\fR program is a filter that reads a byte-sorted JSON file from sysin 
 and writes a reduced JSON file to sysout. 
 Timespans shorter than \fIgranularity\fR microseconds are accumulated and replaced 
 by a single representative timespan, 
@@ -121,19 +127,19 @@ A granularity of perhaps 5 microseconds reduces the file size substantially,
 which in turn gives a more responsive but degraded HTML display. 
 This can be used with large traces to pick out subsets of a trace to examine at
 full resolution.
-The output must be sorted by byte code before being used as input 
+The output must be re-sorted by byte code before being used as input 
 for the other programs.
 .\"
 .TP
 \fBspantotrim\fR \fIstart-sec\fR [\fIstop-sec\fR] 
-The \fBspantotrim\fR program reads a byte-sorted JSON file from sysin 
+The \fBspantotrim\fR program is a filter that reads a byte-sorted JSON file from sysin 
 and writes a reduced JSON file to sysout. All timespans in the range
 [start..stop] are retained, along with the JSON header and footer lines. 
 The times are seconds and fractions.
 .\"
 .TP
 \fBsamptoname_k\fR \fIallsyms-file\fR
-The \fBsamptoname_k\fR program reads a byte-sorted JSON file from sysin 
+The \fBsamptoname_k\fR program is a filter that reads a byte-sorted JSON file from sysin 
 and writes a JSON file to sysout, changing kernel PC sample hex values into 
 kernel routine names. 
 The lookup of names is based on the \fIallsyms-file\fR
@@ -149,7 +155,7 @@ Address Space Layout Randomization (ASLR).
 .\"
 .TP
 \fBsamptoname_u\fR \fIpidmaps-file\fR
-The \fBsamptoname_u\fR program reads a byte-sorted JSON file from sysin 
+The \fBsamptoname_u\fR program is a filter that reads a byte-sorted JSON file from sysin 
 and writes a JSON file to sysout, changing user PC sample hex values into 
 user routine names. 
 The lookup of names is based on the \fIpidmaps-file\fR
@@ -171,7 +177,7 @@ The mapping above specifies for each address range which executable image is loa
 .\"
 .TP
 \fBspantoprof\fR [\fI\-row\fR] [\fI\-group\fR [\fI\-all\fR]] [\fI\-v\fR]
-The \fBspantoprof\fR program reads a byte-sorted JSON file from sysin 
+The \fBspantoprof\fR program is a filter that reads a byte-sorted JSON file from sysin 
 and writes a reduced JSON file to sysout, aggregating like timespans on each row. 
 For each CPU, PID, or RPC row, the durations of all timespans with the same 
 number (e.g. sysread is event number 3) are summed into a single timespan. 
@@ -195,7 +201,7 @@ The output JSON has the same number of rows as the input JSON.
 .TP
 .B \-group 
 Aggregate rows with the same name but different CPU/PID/RPCID numbers
-into power-of-two groups, plus an overall average group. 
+into power-of-two groups by elapsed time, plus an overall average group. 
 Suppress groups that are aggregates of just one row unless \fB\-all\fR is specified.
 .TP
 .B \-all 
@@ -206,29 +212,116 @@ Enable verbose output.
 .RE
 .\"
 .TP
-\fBkuod\fR \fIraw-trace-file\fR
-The \fBkuod\fR program reads a raw trace file and dumps it in hex in a format similar to
+\fBunmakeself\fR [\fIraw-trace-file\fR]
+The \fBunmakeself\fR program is a filter that reads an HTML file from sysin 
+or a file and 
+writes the embedded JSON file to sysout. That output is a single very long line of text.
+Pipe it through
+.nf
+  sed 's/\], /\],\n/g' 
+.fi
+to turn it back into one entry per line. The \fBremake\fR script uses this.
+.\"
+.TP
+\fBchecktrace\fR \fIraw-trace-file\fR [\fI\-v\fR] [\fI\-q\fR] [\fI\-h\fR] [\fI\-nopf\fR]
+The \fBchecktrace\fR program reads a raw trace file and briefly checks it for 
+correctness and consistency. 
+The output lines begin with OK, Warn, or FAIL to indicate the severity of the message,
+and the final line gives PASS/FAIL/FAILFAST and the file name. 
+FAILFAST is used exclusively for files that cannot be valid raw trace files.
+To avoid clutter, each specific message is normally given only twice.
+.RS
+.TP
+.B \-v 
+Verbose. 
+Show the underlying hex words at each problem. Show more than two of each message.
+.TP
+.B \-q 
+Quiet. 
+Show only the PASS/FAIL last line for each file.
+.TP
+.B \-h 
+Hex. 
+Show the eight bytes of hex for every input event (for debugging).
+.TP
+.B \-nopf 
+No page fault checking. 
+Some traces by design have no faults. Don't fail them just because of this.
+.RE
+.\"
+.TP
+\fBkuod\fR [\fIraw-trace-file\fR]
+The \fBkuod\fR program is a filter that reads a raw trace from sysin or a file and 
+dumps it in hex in a format similar to
 .nf
   $ od -Ax -tx8z -w32 foo.trace
 .fi
 except that the alphabetic text is there even for FreeBSD, and the hex is separated
 in groups of 8KB. New per-CPU trace blocks start on 64KB boundaries without IPC data and
-on 72KB boundaries with IPC data.
+on 72KB boundaries with IPC data. 
+Normal trace entries are formatted as 5 hex characters of the 20-bit timestamp, dot, 
+and 11 hex characters, of which the first three are the raw 12-bit event number and
+the rest are an argument or delta_timestamp, retval, arg0 for optimized call/return.
+Continuation words in multi-word entries begin with underscore. 
+Trace block header words are formatted with plain 16 hex characters, as are IPC words.
+.\"
+.TP
+\fBfrom_base40\fR 
+The \fBfrom_base40\fR library converts 32 bits back into six base40 characters. 
+It is used by \fBrawtoevent\fR and \fBspantotrim\fR.
+.\"
+.TP
+\fBkutrace_lib\fR 
+The \fBkutrace_lib\fR library can be linked into user programs. It allows inserting
+trace entries or controlling tracing. 
+It includes one of the \fBkutrace_control_names*.h\fR files to embed 
+proper syscall, interrupt, and fault names.
+See \fIkutrace_control\fR(7) for more detail.
+.\"
+.TP
+\fBtime_getpid\fR 
+The \fBtime_getpid\fR program is a simple test that does 100,000 \fBgetppid()\fR system 
+calls and inserts 100,000 \fBmark_a\fR events into a trace. 
+It can be run with no KUtrace and again with \fIKUtrace go\fR and again 
+with \fIKUtrace goipc\fR to measure the overhead of KUtrace itself. 
+It is also an example of using the \fBkutrace_lib.cc\fR library.
+The lack of "pp" in the program name 
+allows one to search the resulting HTML trace for either the program itself or for
+getppid system calls.
+.\"
+.SH SCRIPTS
+.\"
+.TP
+\fBbuild_postproc.sh\fR 
+The \fBbuild_postproc.sh\fR script compiles all the postprocessing programs.
+.\"
+.TP
+\fBpostproc3.sh\fR <\fIraw trace file name\fR> \fI"title"\fR [\fIstart_second stop_second\fR]
+The \fBpostproc3.sh\fR script takes a raw trace file name and a title string as 
+arguments and then runs \fBrawtoevent\fR, \fBeventtospan\fR, and \fBmakeself\fR to produce
+JSON and HTML files. It optionally takes two times in seconds and runs \fBspantotrim\fR to
+put only that subset time span into the HTML file. It does the proper sorting between
+steps.
+.\"
+.TP
+\fBremake.sh\fR <\fIHTML file name\fR>
+The \fBremake.sh\fR script uses \fBunmakeself\fR, \fBsed\fR, and \fBmakeself\fR to 
+remove an old HTML template and insert a new one around an embedded JSON file.
 .\"
 .SH EXAMPLES
 .\"
 .SH FILES
 .nf
 \fBrawtoevent.cc\fR, \fBeventtospan3.cc\fR, etc.
-\fBbasetypes.h from_base40.h kutrace_lib.h kutrace_control_names.h\fR
+\fBbasetypes.h from_base40.h kutrace_lib.h kutrace_control_names*.h\fR
 \fBfrom_base40.cc kutrace_lib.cc\fR
-\fBd3.v4.min.js\fR
+\fBd3.v4.min.js\fR \fBshow_cpu.html\fR
 .fi
 .SH SEE ALSO
-See \fIkutrace_mod\fR for the loadable module, and
-see \fIkutrace_control\fR for the controlling user-mode library. 
+See \fIkutrace_mod\fR(7) for the loadable module, and
+see \fIkutrace_control\fR(7) for the controlling user-mode library. 
 More information is available in 
 the Addison-Wesley book \fIUnderstanding Software Dynamics\fR (2022).
-The d3 JavaScript library by  Mike Bostock is described at \fBhttps://d3js.org/\fR
+The d3 JavaScript library by Mike Bostock is described at \fBhttps://d3js.org/\fR
 .\"
 .SH BUGS

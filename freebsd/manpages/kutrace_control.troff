@@ -47,7 +47,8 @@ This can be used to dynamically sample progress while actively tracing.
 .TP
 .B KUTRACE_CMD_INSERT1
 If tracing is on, create a one-word trace entry or none. The 64-bit \fIarg\fR 
-contains a pre-built complete entry with 20 bits of 0 in the timestamp field. 
+contains a pre-built complete entry with 20 bits of 0 in the timestamp field, 
+which the call fills in. 
 A return event matching a call event in the previous entry is merged into that entry and
 no new entry is created. 
 If the trace buffer is full and is not wrapping around, turns off tracing and returns 0.
@@ -57,7 +58,8 @@ Returns the number of words created. Returns 0 if tracing is off.
 If tracing is on, create a multi-word trace entry.
 For this call, \fIarg\fR is a 64-bit pointer cast to an unsigned long. 
 It points to a block of exactly 64 bytes containing 1 to 8 eight-byte words. 
-This contains a pre-built complete entry with 20 bits of 0 in the timestamp field
+This contains a pre-built complete entry with 20 bits of 0 in the timestamp field, 
+which the call fills in, 
 in word[0] and the total number of words N in the middle hex digit of the entry number,
 word[0] bits <39:36>.
 \fBNote:\fR All 64 bytes are copied into a kernel buffer even if the length is 
@@ -91,9 +93,11 @@ This is called 1M times to dump 1M trace words (8MB). Somewhat inefficient, but
 often limited by disk speed when writing a raw trace to a file.
 .TP
 .B KUTRACE_CMD_GETIPCWORD
-Like GETWORD but returns one byte of IPC data (two four-bit values) per call. 
+Like GETWORD but returns one eight-byte word of IPC data per call, 
+subscripted by arg, which must be in the range 0 to (GETCOUNT/8)-1.
 For combined call/return pairs, the low four bits are the IPC leading up to the call,
-and the high four bits are the IPC between the call and the return.
+and the high four bits are the IPC between the call and the return. 
+For other events, the low four bits are the IPC leading up to the event.
 .TP
 .B KUTRACE_CMD_TEST
 Returns 1 if tracing is on, 0 if it is off. The value of \fIarg\fR is ignored.  
