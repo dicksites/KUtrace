@@ -500,7 +500,7 @@ static const NumNamePair Syscall64Names[] = {
  *  Vectors 240-255 : IPIs in FreeBSD
  */
 
-/* See scrape_irq.sh */
+/* See scrape_irq_freebsd.sh */
 static const NumNamePair IrqNames[] = {
   // Scraped from vmstat -ia on 2022-07-03
   {1, "atkbd0"},
@@ -532,7 +532,7 @@ static const NumNamePair IrqNames[] = {
 };
 
 // Bottom half BH vectors, from include/linux/interrupt.h
-// Unused in FreeBSD
+// UNUSED in FreeBSD
 static const NumNamePair SoftIrqNames[] = {
   {0, "HI_SOFTIRQ"},
   {1, "TIMER_SOFTIRQ"},
@@ -557,14 +557,14 @@ static const NumNamePair TrapNames[] = {
   {4, "Overflow"},
   {5, "Bound_Range_Exceeded"},
   {6, "Invalid_Opcode"},
-  {7, "dev_not_avail"},
+  {7, "dev_not_avail"},			// Used
   {8, "Double_Fault"},
   {9, "Coprocessor_Segment_Overrun"},
   {10, "Invalid_TSS"},
   {11, "Segment_Not_Present"},
   {12, "Stack_Segment_Fault"},
   {13, "General_Protection_Fault"},
-  {14, "page_fault"},
+  {14, "page_fault"},			// Used
   {15, "Spurious_Interrupt"},
   {16, "x87_Floating-Point_Exception"},
   {17, "Alignment_Check"},
@@ -574,7 +574,7 @@ static const NumNamePair TrapNames[] = {
   {-1, NULL},		// Must be last
 };
 
-/* See scrape_errno.sh */
+/* See scrape_errno_freebsd.sh */
 static const NumNamePair ErrnoNames[] = {
   // Scraped from /usr/src/sys/sys/errno.h on 2022-07-03
   {1, "EPERM"},  /* Operation not permitted */
