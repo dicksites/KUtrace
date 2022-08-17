@@ -1,0 +1,327 @@
+.TH KUTRACE 1
+.SH NAME
+.B kutrace_postprocessing 
+\- programs to turn raw kernel-user tracing output into dynamic HTML
+.\"
+.SH SYNOPSIS
+.nf
+.B rawtoevent
+.B eventtospan3
+.B makeself
+.B spantospan
+.B spantotrim
+.B samptoname_k
+.B samptoname_u
+.B spantoprof
+.B unmakeself
+.B checktrace
+.B kuod
+
+.B from_base40
+.B kutrace_lib
+.B time_getpid
+.fi
+.\"
+.SH DESCRIPTION
+.B KUtrace 
+records a \fIcomplete\fR trace of every transition between kernel- and user-mode execution
+on all CPU cores. Once a raw trace file is created by copying out the data recorded in 
+a kernel trace buffer, several postprocessing programs turn that raw trace into dynamic 
+HTML showing timelines for every CPU and optionally every thread and in some environments 
+every remote procedure call (RPC) or other transaction. 
+The postprocessing programs are described here.
+.PP
+.nf
+The standard flow is:
+export LC_ALL=C
+cat foo.trace |./rawtoevent |sort \-n |./eventtospan3 "my title" \\
+  |sort >foo.json
+    <insert any of the other programs here as additional filters>
+cat foo.json |./makeself show_cpu.html >foo.html
+.fi
+.\"
+.SH PROGRAMS
+.TP
+\fBrawtoevent\fR [\fB\-v\fR] [\fB\-h\fR]
+The \fBrawtoevent\fR program reads a raw trace file from sysin and writes a text form
+of each event to sysout.
+Based on <gettimeofday, timecounter> pairs recorded at the beginning and end of each 
+trace and based on reconstructing the high-order bits of 20-bit timestamps, it converts
+each timestamp and duration into multiples of 10 nsec from a 
+wallclock one-minute boundary. 
+The CPU number recorded once at the beginning of each trace block is propagated to
+all entries in the block. The PID (actually thread ID) in each context switch entry 
+is propagated to all subsequent entries. The RPC ID in each KUTRACE_RPCIDREQ or 
+KUTRACE_RPCIDRESP entry is propagated to all subsequent entries. 
+Event number, argument, and return-value fields are given explicitly.
+IPC values and meaningful names for each entry are merged in. 
+Name entries are duplicated, one at its timestamp and one at time -1, 
+so a copy of all names will sort to the front of the event text file.
+The net result is an event text file with ten space-separated fields per line.
+The output must be sorted numerically before being used as input for eventtospan3.
+.RS
+.TP
+.B \-v 
+Turn on verbose output. The resulting output file is not suitable as input to eventtospan3.
+.TP
+.B \-h 
+Show each entry in its raw hex form.
+The resulting output file is not suitable as input to eventtospan3.
+.RE
+.\"
+.TP
+\fBeventtospan3\fR \fItitle\fR [\fB\-v\fR] [\fB\-t\fR]
+The \fBeventtospan3\fR program reads a numerically-sorted event file from sysin 
+and writes a text JSON file to sysout. 
+It turns the execution transition events from rawtoevent into timespans between
+those events, running for each CPU a small reconstruction stack of calls so that
+returns pick up with the previous timespan, 
+recovering gracefully from missing information. 
+It synthesizes wakeup arcs, PID and RPC waiting (non-execution) timespans, 
+low-power exit timespans, network activity timespans, lock timespans, 
+queued-work timespans, and CPU frequency overlays. 
+Multi-line JSON header and footer information is added.
+The net result is a JSON text file with an array of timespans, each a sub-array of 
+ten comma-separated fields per line.
+The output must be sorted by byte code (i.e. LC_ALL=C) before being used as input 
+for the remaining programs.
+.RS
+.TP
+.B \-v 
+Turn on verbose output. The resulting output file is not suitable as input to makeself.
+.TP
+.B \-t 
+Show each entry and the resulting intermediate reconstruction stack.
+The resulting output file is not suitable as input to makeself.
+.RE
+.\"
+.TP
+\fBmakeself\fR \fItemplate-HTML-file\fR [\fB\-nod3\fR] 
+The \fBmakeself\fR program reads a byte-sorted JSON file from sysin 
+and writes an HTML file to sysout. 
+It embeds the input JSON as a large string into the specified HTML wrapper, along with
+a copy of the d3.v4.min.js JavaScript library. 
+The HTML wrapper implements a substantial user 
+interface for displaying timelines, panning and zooming, and selecting which information
+to display. For KUtrace, this wrapper is \fBshow_cpu.html\fR. 
+(In the book, other templates are used for disk traces and RPC traces.)
+.nf
+\fBNote:\fR d3.v4.min.js must be in the same directory as \fBmakeself\fR.
+.fi
+.RS
+.TP
+.B \-nod3 
+Rather than embedding the d3 library, insert a link to it on the web. 
+This makes the HTML file about 200KB smaller, but it depends on internet access to open.
+\fBNote:\fR The -nod3 option is not currently implemented.
+.RE
+.\"
+.TP
+\fBspantospan\fR \fIgranularity-usec\fR 
+The \fBspantospan\fR program is a filter that reads a byte-sorted JSON file from sysin 
+and writes a reduced JSON file to sysout. 
+Timespans shorter than \fIgranularity\fR microseconds are accumulated and replaced 
+by a single representative timespan, 
+chosen as the largest of accumulated idle time, kernel time, and user time.
+A granularity of perhaps 5 microseconds reduces the file size substantially,
+which in turn gives a more responsive but degraded HTML display. 
+This can be used with large traces to pick out subsets of a trace to examine at
+full resolution.
+The output must be re-sorted by byte code before being used as input 
+for the other programs.
+.\"
+.TP
+\fBspantotrim\fR \fIstart-sec\fR [\fIstop-sec\fR] 
+The \fBspantotrim\fR program is a filter that reads a byte-sorted JSON file from sysin 
+and writes a reduced JSON file to sysout. All timespans in the range
+[start..stop] are retained, along with the JSON header and footer lines. 
+The times are seconds and fractions.
+.\"
+.TP
+\fBsamptoname_k\fR \fIallsyms-file\fR
+The \fBsamptoname_k\fR program is a filter that reads a byte-sorted JSON file from sysin 
+and writes a JSON file to sysout, changing kernel PC sample hex values into 
+kernel routine names. 
+The lookup of names is based on the \fIallsyms-file\fR
+that contains the mapping as produced by the Linux command
+.nf
+  sudo cat /proc/kallsyms |sort >somefile.txt
+.fi
+The mappings may well change at each reboot because of 
+Address Space Layout Randomization (ASLR).
+.nf
+\fBNOTE:\fR This is not currently implemented for FreeBSD.
+.fi
+.\"
+.TP
+\fBsamptoname_u\fR \fIpidmaps-file\fR
+The \fBsamptoname_u\fR program is a filter that reads a byte-sorted JSON file from sysin 
+and writes a JSON file to sysout, changing user PC sample hex values into 
+user routine names. 
+The lookup of names is based on the \fIpidmaps-file\fR
+that contains the mapping as produced by the Linux commands
+.nf
+  sudo ls /proc/*/maps \\
+    |xargs -I % sh -c 'echo "\n====" %; sudo cat %' \\
+    >someotherfile.txt
+.fi
+The mappings may well change at each program startup because of 
+Address Space Layout Randomization (ASLR). 
+It may well be necessary to capture the mappings for all processes \fIwhile\fR
+KUtrace is actively tracing.
+The mapping above specifies for each address range which executable image is loaded. 
+\fBsamptoname_u\fR uses \fBaddr2line\fR against each such image to get routine names.
+.nf
+\fBNOTE:\fR This is not currently implemented for FreeBSD.
+.fi
+.\"
+.TP
+\fBspantoprof\fR [\fI\-row\fR] [\fI\-group\fR [\fI\-all\fR]] [\fI\-v\fR]
+The \fBspantoprof\fR program is a filter that reads a byte-sorted JSON file from sysin 
+and writes a reduced JSON file to sysout, aggregating like timespans on each row. 
+For each CPU, PID, or RPC row, the durations of all timespans with the same 
+number (e.g. sysread is event number 3) are summed into a single timespan. 
+A weighted sum of the IPC values gives a representative IPC for the accumulated span.
+The resulting kernel and user execution timespans are sorted by decreasing duration, 
+followed by idle and waiting spans sorted by decreasing duration, and these produce
+a reconstituted row. 
+Overlays such as CPU frequency, PC samples, and lock activity are similarly
+aggregated and sorted by decreasing duration. Each resulting row is much like a
+PC-sampled profile but much more accurate since it based on exact execution times, and
+separated by CPU number, PID number, and RPCID number.
+Aggregate rows with the same name but different CPU/PID/RPCID numbers
+may be further combined into power-of-two total duration groups. 
+This is especially useful to see how long RPCs/transactions differ from short ones, or
+long threads from short ones.
+.RS
+.TP
+.B \-row 
+Aggregate within each row (the default). 
+The output JSON has the same number of rows as the input JSON.
+.TP
+.B \-group 
+Aggregate rows with the same name but different CPU/PID/RPCID numbers
+into power-of-two groups by elapsed time, plus an overall average group. 
+Suppress groups that are aggregates of just one row unless \fB\-all\fR is specified.
+.TP
+.B \-all 
+For groups, include in the output groups that are aggregates of just one row.
+.TP
+.B \-v 
+Enable verbose output.
+.RE
+.\"
+.TP
+\fBunmakeself\fR [\fIraw-trace-file\fR]
+The \fBunmakeself\fR program is a filter that reads an HTML file from sysin 
+or a file and 
+writes the embedded JSON file to sysout. That output is a single very long line of text.
+Pipe it through
+.nf
+  sed 's/\], /\],\n/g' 
+.fi
+to turn it back into one entry per line. The \fBremake\fR script uses this.
+.\"
+.TP
+\fBchecktrace\fR \fIraw-trace-file\fR [\fI\-v\fR] [\fI\-q\fR] [\fI\-h\fR] [\fI\-nopf\fR]
+The \fBchecktrace\fR program reads a raw trace file and briefly checks it for 
+correctness and consistency. 
+The output lines begin with OK, Warn, or FAIL to indicate the severity of the message,
+and the final line gives PASS/FAIL/FAILFAST and the file name. 
+FAILFAST is used exclusively for files that cannot be valid raw trace files.
+To avoid clutter, each specific message is normally given only twice.
+.RS
+.TP
+.B \-v 
+Verbose. 
+Show the underlying hex words at each problem. Show more than two of each message.
+.TP
+.B \-q 
+Quiet. 
+Show only the PASS/FAIL last line for each file.
+.TP
+.B \-h 
+Hex. 
+Show the eight bytes of hex for every input event (for debugging).
+.TP
+.B \-nopf 
+No page fault checking. 
+Some traces by design have no faults. Don't fail them just because of this.
+.RE
+.\"
+.TP
+\fBkuod\fR [\fIraw-trace-file\fR]
+The \fBkuod\fR program is a filter that reads a raw trace from sysin or a file and 
+dumps it in hex in a format similar to
+.nf
+  $ od -Ax -tx8z -w32 foo.trace
+.fi
+except that the alphabetic text is there even for FreeBSD, and the hex is separated
+in groups of 8KB. New per-CPU trace blocks start on 64KB boundaries without IPC data and
+on 72KB boundaries with IPC data. 
+Normal trace entries are formatted as 5 hex characters of the 20-bit timestamp, dot, 
+and 11 hex characters, of which the first three are the raw 12-bit event number and
+the rest are an argument or delta_timestamp, retval, arg0 for optimized call/return.
+Continuation words in multi-word entries begin with underscore. 
+Trace block header words are formatted with plain 16 hex characters, as are IPC words.
+.\"
+.TP
+\fBfrom_base40\fR 
+The \fBfrom_base40\fR library converts 32 bits back into six base40 characters. 
+It is used by \fBrawtoevent\fR and \fBspantotrim\fR.
+.\"
+.TP
+\fBkutrace_lib\fR 
+The \fBkutrace_lib\fR library can be linked into user programs. It allows inserting
+trace entries or controlling tracing. 
+It includes one of the \fBkutrace_control_names*.h\fR files to embed 
+proper syscall, interrupt, and fault names.
+See \fIkutrace_control\fR(7) for more detail.
+.\"
+.TP
+\fBtime_getpid\fR 
+The \fBtime_getpid\fR program is a simple test that does 100,000 \fBgetppid()\fR system 
+calls and inserts 100,000 \fBmark_a\fR events into a trace. 
+It can be run with no KUtrace and again with \fIKUtrace go\fR and again 
+with \fIKUtrace goipc\fR to measure the overhead of KUtrace itself. 
+It is also an example of using the \fBkutrace_lib.cc\fR library.
+The lack of "pp" in the program name 
+allows one to search the resulting HTML trace for either the program itself or for
+getppid system calls.
+.\"
+.SH SCRIPTS
+.\"
+.TP
+\fBbuild_postproc.sh\fR 
+The \fBbuild_postproc.sh\fR script compiles all the postprocessing programs.
+.\"
+.TP
+\fBpostproc3.sh\fR <\fIraw trace file name\fR> \fI"title"\fR [\fIstart_second stop_second\fR]
+The \fBpostproc3.sh\fR script takes a raw trace file name and a title string as 
+arguments and then runs \fBrawtoevent\fR, \fBeventtospan\fR, and \fBmakeself\fR to produce
+JSON and HTML files. It optionally takes two times in seconds and runs \fBspantotrim\fR to
+put only that subset time span into the HTML file. It does the proper sorting between
+steps.
+.\"
+.TP
+\fBremake.sh\fR <\fIHTML file name\fR>
+The \fBremake.sh\fR script uses \fBunmakeself\fR, \fBsed\fR, and \fBmakeself\fR to 
+remove an old HTML template and insert a new one around an embedded JSON file.
+.\"
+.SH EXAMPLES
+.\"
+.SH FILES
+.nf
+\fBrawtoevent.cc\fR, \fBeventtospan3.cc\fR, etc.
+\fBbasetypes.h from_base40.h kutrace_lib.h kutrace_control_names*.h\fR
+\fBfrom_base40.cc kutrace_lib.cc\fR
+\fBd3.v4.min.js\fR \fBshow_cpu.html\fR
+.fi
+.SH SEE ALSO
+See \fIkutrace_mod\fR(7) for the loadable module, and
+see \fIkutrace_control\fR(7) for the controlling user-mode library. 
+More information is available in 
+the Addison-Wesley book \fIUnderstanding Software Dynamics\fR (2022).
+The d3 JavaScript library by Mike Bostock is described at \fBhttps://d3js.org/\fR
+.\"
+.SH BUGS

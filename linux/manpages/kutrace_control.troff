@@ -1,0 +1,181 @@
+.TH KUTRACE 1
+.SH NAME
+.B kutrace_control 
+\- system call to control kernel-user tracing
+.\"
+.SH SYNOPSIS
+.nf
+.B syscall(__NR_kutrace_control, command, arg);
+.fi
+.\"
+.SH DESCRIPTION
+.B KUtrace 
+records a \fIcomplete\fR trace of every transition between kernel- and user-mode execution
+on all CPU cores.
+It is controlled via a system call with two parameters, \fIcommand\fR and \fIarg\fR.
+The various commands turn tracing on and off, insert extra trace entries, and extract
+raw trace entries for writing to a file. Each call returns an unsigned 64-bit value. 
+.PP
+\fBNOTE:\fR All calls return ~0L (all 1s) if kutrace_mod.ko is not loaded, 
+or the user privilege check fails, or an illegal command is given.
+.\"
+.SH USER COMMANDS
+.TP
+.B KUTRACE_CMD_RESET
+Reset to prepare for a fresh trace. Set tracing off. 
+\fIarg\fR is the OR of flags to specify turning on IPC tracking and 
+enabling wraparound tracing (flight recorder mode). 
+Flag DO_IPC=1, DO_WRAP=2.
+Returns 0.
+.TP
+.B KUTRACE_CMD_ON
+Turn tracing on. The value of \fIarg\fR is ignored. Returns 1.
+.TP
+.B KUTRACE_CMD_OFF
+Turn tracing off. The value of \fIarg\fR is ignored. Returns 0.
+.TP
+.B KUTRACE_CMD_FLUSH
+Flush all partially-filled trace blocks, filling them up with NOP entries (zeros).
+Tracing must be off before calling this.
+The value of \fIarg\fR is ignored. 
+Returns the number of eight-byte words zeroed. 
+.TP
+.B KUTRACE_CMD_STAT
+Returns the number of filled 64KB trace blocks.
+The value of \fIarg\fR is ignored. 
+This can be used to dynamically sample progress while actively tracing.
+.TP
+.B KUTRACE_CMD_INSERT1
+If tracing is on, create a one-word trace entry or none. The 64-bit \fIarg\fR 
+contains a pre-built complete entry with 20 bits of 0 in the timestamp field, 
+which the call fills in. 
+A return event matching a call event in the previous entry is merged into that entry and
+no new entry is created. 
+If the trace buffer is full and is not wrapping around, turns off tracing and returns 0.
+Returns the number of words created. Returns 0 if tracing is off.
+.TP
+.B KUTRACE_CMD_INSERTN
+If tracing is on, create a multi-word trace entry.
+For this call, \fIarg\fR is a 64-bit pointer cast to an unsigned long. 
+It points to a block of exactly 64 bytes containing 1 to 8 eight-byte words. 
+This contains a pre-built complete entry with 20 bits of 0 in the timestamp field, 
+which the call fills in, 
+in word[0] and the total number of words N in the middle hex digit of the entry number,
+word[0] bits <39:36>.
+\fBNote:\fR All 64 bytes are copied into a kernel buffer even if the length is 
+less than 8.
+If the trace buffer has insufficient room and is not wrapping around, 
+turns off tracing and returns 0.
+Returns the number of words created. Returns 0 if tracing is off.
+.TP
+.B ~KUTRACE_CMD_INSERT1
+The command value is KUTRACE_CMD_INSERT1 with all bits inverted. 
+Unconditionally do INSERT1. This is used to insert initial 
+entries before turning on tracing.
+Returns the number of words created. 
+.TP
+.B ~KUTRACE_CMD_INSERTN
+The command value is KUTRACE_CMD_INSERTN with all bits inverted. 
+Unconditionally do INSERTN. This is used to insert initial 
+name entries before turning on tracing.
+Returns the number of words created. 
+.TP
+.B KUTRACE_CMD_GETCOUNT
+Returns the number of filled eight-byte trace words.
+Tracing must be off off and flush must have been called before calling this.
+The value of \fIarg\fR is ignored. 
+.TP
+.B KUTRACE_CMD_GETWORD
+Read and return one eight-byte word of trace data, subscripted by \fIarg\fR, which
+must be in the range 0 to GETCOUNT-1. 
+Tracing must be off off and flush must have been called before calling this.
+This is called 1M times to dump 1M trace words (8MB). Somewhat inefficient, but
+often limited by disk speed when writing a raw trace to a file.
+.TP
+.B KUTRACE_CMD_GETIPCWORD
+Like GETWORD but returns one eight-byte word of IPC data per call, 
+subscripted by arg, which must be in the range 0 to (GETCOUNT/8)-1.
+For combined call/return pairs, the low four bits are the IPC leading up to the call,
+and the high four bits are the IPC between the call and the return. 
+For other events, the low four bits are the IPC leading up to the event.
+.TP
+.B KUTRACE_CMD_TEST
+Returns 1 if tracing is on, 0 if it is off. The value of \fIarg\fR is ignored.  
+.TP
+.B KUTRACE_CMD_VERSION
+Returns the module version number, currently 3. The value of \fIarg\fR is ignored.  
+
+.\"
+.SH USER-MODE CALLS
+The user-mode library kutrace_lib.cc implements several calls for inserting raw trace 
+entries from user programs. These are all in the C++ kutrace:: namespace.
+.TP
+.nf
+.B "void mark_a(const char* label)"
+.B "void mark_b(const char* label)"
+.B "void mark_c(const char* label)"
+.B "void mark_d(u64 n)"
+.fi
+If tracing is on, create one marker trace entry. The \fIlabel\fR is 1..6 base40 
+characters, a-z 0-9 and minus, period, slash. Six characters are packed into 32 bits.
+By convention, labels beginning with slash are shown right-justified in the HTML display
+and other labels are shown left-justified. Thus, "foo" and "/foo" will nicely bracket
+an execution span. 
+The mark_a labels are shown just under the corresponding timeline, mark_b labels
+somewhat lower, mark_c labels centered and even with mark_a. The mark_d call inserts
+the low 32 bits of an unsigned integer \fIn\fR.
+.TP
+.B "u64 addevent(u64 eventnum, u64 arg)"
+If tracing is on, addevent adds an arbitrary trace entry with \fIeventnum\fR chosen
+from the values in kutrace_lib.h. 
+This can be used to track RPC or transaction activity by inserting KUTRACE_RPCIDREQ with
+\fIarg\fR as a non-zero RPC ID number at the beginning of processing that RPC, 
+and inserting KUTRACE_RPCIDREQ with \fIarg\fR=0 at the end of processing. 
+It can also be used to track software lock contention by inserting KUTRACE_LOCKNOACQUIRE
+with \fIarg\fR as a lock ID number when a lock acquire finds the lock in use, 
+inserting KUTRACE_LOCKACQUIRE with \fIarg\fR as a lock ID number when a contended lock is 
+finally acquired, and 
+inserting KUTRACE_LOCKWAKEUP with \fIarg\fR as a lock ID number when freeing a contended 
+lock that has other threads waiting.
+.TP
+.B "void addname(u64 eventnum, u64 number, const char* name)"
+If tracing is on, addname adds an arbitrary name entry. 
+The \fIeventnum\fR is one of KUTRACE_*NAME from kutrace_lib.h, for example 
+KUTRACE_METHODNAME for RPCs or KUTRACE_LOCKNAME for locks. The \fInumber\fR is which
+RPC ID, lock ID, etc. is being named. The \fIname\fR can be any printable ASCII string
+of 1..56 characters. 
+.TP
+.B "go(), goipc(), stop(), etc."
+There are also calls for controlling tracing. 
+These follow the commands described in \fBkutrace_control\fR(7).
+.\"
+.SH ENVIRONMENT
+.\"
+.SH EXAMPLES
+.\"
+.SH TIPS
+.\"
+.SH FILES
+.TP
+.B kutrace_lib.h
+Defines command numbers, event numbers, and macros for kutrace_lib.cc. 
+This file contains the definitive list of KUtrace event numbers.
+.TP
+.B kutrace_lib.cc
+A library that implements the controlling commands via the kutrace_control system call. 
+User programs can use this directly to control tracing and to insert extra trace entries
+such as short markers at various points of execution.
+.TP
+.B kutrace_control_names.h
+The list of syscall names, etc. inserted into the front of each trace by kutrace_lib.cc
+.TP
+.B kutrace_control.cc
+A wrapper for kutrace_lib that implements a simple command-line interface to create traces
+.\"
+.SH SEE ALSO
+See \fIkutrace_mod\fR for the loadable module, and 
+see \fIkutrace_postproc\fR for the downstream programs to turn
+raw traces into dynamic HTML files to display. More information is available in 
+the Addison-Wesley book \fIUnderstanding Software Dynamics\fR (2022).
+.\"
+.SH BUGS

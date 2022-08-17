@@ -1,0 +1,135 @@
+.TH KUTRACE(7) 1
+.SH NAME
+.B kutrace_mod 
+\- loadable module to implement kernel-user tracing
+.\"
+.SH SYNOPSIS
+.nf
+.B kutrace1(event, arg)
+.B kutrace_pidname(next)
+.B kutrace_pidrename(next)
+.B kutrace_pc(arg)
+.B kutrace_pkttrace(rx_tx, ku_payload)
+.fi
+.\"
+.SH DESCRIPTION
+.B KUtrace 
+records a \fIcomplete\fR trace of every transition between kernel- and user-mode execution
+on all CPU cores.
+It is implemented as a small set of kernel patches that use the above macros to
+call out to a loadable module, whose interface is specified here.
+Most patches are one-line calls to kutrace1. 
+For a kernel built without KUtrace support, the module will not load.
+.PP
+The module writes trace entries to a kernel-memory trace buffer that is allocated
+at module load time. This buffer is dynamically sub-allocated in blocks for each CPU,
+avoiding cache thrashing. Entries are eight bytes each, 
+with most entries recording a \fIpair\fR of transitions for a system call/return, 
+interrupt handler call/return, or fault handler call/return.
+.PP
+KUtrace is controlled by user-mode programs using an extra system call to get to
+the trace_control module entry point. These calls turn tracing on and off, insert
+extra trace entries, and extract raw trace entries from the buffer, as described in 
+\fBkutrace_control\fR(7).
+Postprocessing programs turn raw traces into dynamic HTML files for display, as described 
+in \fBkutrace_postprocessing\fR(7).
+.\"
+.SH KERNEL MACROS
+.TP
+.B "kutrace1(uint64_t num, uint64_t arg)" 
+If tracing is on, create one trace entry or none, containing a 20-bit timestamp, 
+the 12-bit event number \fInum\fR, and a 32-bit argument \fIarg\fR. 
+If the event is a return and the immediately preceding trace entry is the matching call,
+the return is folded into the call entry and no new entry is created.
+.TP
+.B "kutrace_pidname(struct task_struct *next)"
+If tracing is on, and if the process ID \fInext\fR->pid has not been seen before in 
+the trace, create a trace entry with its name from \fInext\fR->comm. 
+Each name entry uses multiple eight-byte words. 
+.TP
+.B "kutrace_pidrename(struct task_struct *next)"
+If tracing is on, unconditionally  
+create a trace entry for \fInext\fR->pid with its name from \fInext\fR->com. 
+Used for thread renaming in execve and its ilk.
+.TP
+.B "kutrace_pc(uint64_t arg)"
+If tracing is on, create a two-word trace entry containing a 64-bit PC value \fIarg\fR. 
+Used for PC sampling at timer interrupts.
+.TP
+.B "kutrace_pkttrace(uint64_t rx_tx, uint64_t *ku_payload)"
+\fIku_payload\fR points to the payload of a packet being received from or 
+about to be sent to a network interface card, NIC. 
+The payload begins immediately after the headers in a packet; it is the data that a user
+program can see. If tracing is on and the first bytes of the payload pass a 
+filter test, then a one-word trace entry is created, 
+containing \fIrx_tx\fR as the event number (either KUTRACE_RX_PKT or KUTRACE_TX_PKT) 
+and an argument value that is a hash of the first 32 bytes of the payload.
+Caller must ensure that the payload is at least 32 bytes long. 
+User code may make the same 32-byte hash calculation for data that it is sending 
+or receiving and place that value into the trace with event number KUTRACE_RX_USER or
+KUTRACE_TX_USER. 
+The trace would then show the delay between a user sendmsg call and the 
+first packet being sent to the NIC, or between a packet received from the NIC and
+a user recvmsg return. 
+Filtering involves ANDing against a 24-byte mask, XORing, and looking for a match, 
+based on parameters supplied at module load time. 
+The hash recorded in the trace is a simple XOR over the first 8 four-byte words of the 
+payload data.
+Useful to identify whether a significant delay sending a message happens
+on the sending or receiving computer, or in the network hardware. 
+.\"
+.SH MODULE PARAMETERS
+These parameters are for the $ insmod kutrace.ko command.
+.TP
+.B tracemb=N
+defines the size of the trace buffer in MB (default 32MB). 
+.TP
+.B pktmask=N
+is a 24-bit mask of which bytes to use in the packet-filter hash,
+bit 0 corresponding to byte 0. For example pkthash=0x00000003 specifies 
+including byte[0] and byte[1] of the payload data and ignoring other bytes.
+Other bytes are set to zero before calculating the filter hash.
+pktmask=0 matches no packets. pktmask=-1 matches all packets. 
+The default is pktmask=0x0000000f, using the first four bytes of a packet.
+.TP
+.B pktmatch=N
+is the matching hash value to use in the packet-filter test. 
+The test XORs four-byte words of the first 24 bytes of the payload 
+ANDed with zero bytes specified by pktmask. 
+If the result equals pktmatch the packet is traced, otherwise it is ignored.
+The default is pktmatch=0xd1c517e5, the four-byte signature word used in 
+RPC headers in the book below. Users of the book will thus have the first packet
+of every RPC message traced, but not the other packets.
+.\"
+.SH EXAMPLES
+.nf
+$ insmod kutrace.ko tracemb=20 pktmask=-1
+.fi
+Reserves 20 MB of trace buffer and specifies tracing all incoming and outgoing packets.
+.\"
+.SH FILES
+.TP
+.B include/linux/kutrace.h
+defines event numbers and macros
+.TP
+.B kernel/kutrace/kutrace.c
+defines the small number of kernel variables used by the loadable module
+.TP
+.B kutrace_mod.c
+is the loadable module itself
+.\"
+.SH SEE ALSO
+See \fIkutrace_control\fR(7) for the controlling user-mode library, and 
+see \fIkutrace_postproc\fR(7) for the downstream programs to turn
+raw traces into dynamic HTML files to display. More information is available in 
+the Addison-Wesley book \fIUnderstanding Software Dynamics\fR (2022).
+.\"
+.SH BUGS
+(TBD)
+.\"
+.SH AUTHOR
+Richard L. Sites conceived KUtrace circa 2006 at Google. 
+Ross Biro wrote the original Linux patches there and Sites wrote the postprocessing tools.
+After retiring from Google in 2016, Sites wrote a from-scratch redesigned implementation 
+of Linux patches, loadable module, and postprocessing tools. 
+Drew Gallatin did the original FreeBSD port in 2019, which Sites updated in 2022.
