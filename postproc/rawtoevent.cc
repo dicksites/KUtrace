@@ -31,8 +31,12 @@
 ////#include "kutrace_control_names.h"
 #include "kutrace_lib.h"
 
-// To come from updated kutrace_control_names soon
-static const int kTIMER_IRQ_EVENT = 0x05ec;
+// To come from names in trace
+static int gTIMER_IRQ_EVENT = 0x05ec;	// local_timer
+static int gSCHED_EVENT = 0x0dff;	// -sched-
+
+// Remap high syscall numbers into lo sys32 numbers
+#define	kutrace_map_nr(nr) (nr + (nr & 0x200)) 
 
 /* Amount to shift cycle counter to get 20-bit timestamps */
 /* 4 bits = ~ 2.56 GHz/16 ~ 6nsec tick resolution */
@@ -182,10 +186,10 @@ static const char* soft_irq_name[] = {
 };
 
 const char* missingeventname[16] = {
-  "nam~", "nam~", "spl~", "spl~",
-  "trp~", "irq~", "/trp~", "/irq~",
-  "sys~", "sys~", "/sys~", "/sys~",
-  "s32~", "s32~", "/s32~", "/s32~",
+  "nam#", "nam#", "spl#", "spl#",
+  "trp#", "irq#", "/trp#", "/irq#",
+  "sys#", "sys#", "/sys#", "/sys#",
+  "s32#", "s32#", "/s32#", "/s32#",
 };
 
 typedef map<uint64, string> U64toString;
@@ -361,7 +365,7 @@ inline bool is_pc_sample(uint64 event) {
 
 // Return true if the event is a local timer, for PC start_ts fixup
 inline bool is_timer_irq(uint64 event) {
-  return (event == kTIMER_IRQ_EVENT);
+  return (event == gTIMER_IRQ_EVENT);
 }
 
 // Return true if the event is rpcreq, rpcresp, rpcmid, rpcrxpkt, rpxtxpkt,
@@ -1066,7 +1070,7 @@ fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
           nameinsert = arg | 0x20000;		  // Lock names
         } else if (is_methodnamedef(n)) {
           rpcid = arg & 0xffff;			  // RPC method names
-          lglen8 = arg_hi;	  		      //  may include TenLg msg len
+          lglen8 = arg_hi;	  		  //  may include TenLg msg len
           nameinsert = rpcid | 0x30000;
         } else if (is_kernelnamedef(n)) {
           nameinsert = arg | 0x40000;		  // Kernel version
@@ -1105,6 +1109,16 @@ fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
             names[nameinsert] = name;
             ////OutputName(stdout, nsec10, nameinsert, argall, name.c_str());
             OutputName(stdout, nsec10, n, argall, name.c_str());
+          }
+          // Remember which event number is local_timer (or local_timer_vector) and which is -sched-
+          // (these vary in different historical traces)
+          if (memcmp(tempstring, "local_timer", 11) == 0) {
+            gTIMER_IRQ_EVENT = KUTRACE_IRQ | (arg & 0xffff);
+fprintf(stderr, "local_timer irq = %03x %d\n", gTIMER_IRQ_EVENT, gTIMER_IRQ_EVENT);
+          }
+          if (memcmp(tempstring, "-sched-", 7) == 0) {
+            gSCHED_EVENT = KUTRACE_SYSCALL64 | (kutrace_map_nr(arg & 0xffff));
+fprintf(stderr, "-sched- syscall = %03x %d\n", gSCHED_EVENT, gSCHED_EVENT);
           }
         }
         i += (len - 1);	// Skip over the rest of the name event
@@ -1307,7 +1321,13 @@ fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
       // If we have an empty name in the first 4K event numbers, create one
       if (name.empty() && (event <= 0xFFF) && (0 <= event)) {
         char temp[16];
-        sprintf(temp, "%s%lld", missingeventname[event >> 8], event & 0x0FF);
+        int nummask = (0x800 <= event) ? 0x1FF : 0x0FF;
+        sprintf(temp, "%s%lld", missingeventname[event >> 8], event & nummask);
+        // If event is syscall/ret 511 and no name, then we have a trace file
+        // using 511 for -sched- mismatched with a more recent kutrace_control_names.h
+        // Fix them right here
+        if (event == 0x9ff) {strcpy(temp, "-sched-");} 
+        if (event == 0xbff) {strcpy(temp, "/-sched-");} 
         name = string(temp);
       }
 

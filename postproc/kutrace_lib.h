@@ -186,7 +186,7 @@ typedef struct {
 
 /* Specific syscall numbers */
 /* Take over last syscall32 number for tracing the scheduler call/return */
-#define KUTRACE_SCHEDSYSCALL 1535	/* Top syscall32: 1023 + 512 */
+#define KUTRACE_SCHEDSYSCALL (KUTRACE_SYSCALL32 + 511)	/* Top syscall32: 511 */
 	
 /* Specific trap numbers */
 #define KUTRACE_DNA		7	/* Device (8087) not available */
@@ -235,7 +235,7 @@ static const char* const kSpecialName[32] = {
 
 // Names for events 400-FFF are always embedded in the trace
 
-#if 1
+#if defined(__FreeBSD__)
 // Common ERRNO names for FreeBSD
 // If errno is in [-128..-1], subscript this by -errno - 1. 
 // Error -1 EPERM thus maps to kErrnoName[0], not [1]

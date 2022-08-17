@@ -285,6 +285,8 @@ void GetIrqNames(NumNamePair* irqpairs, irqname* irqnames) {
 
 #if !defined(__FreeBSD__)
 
+static const int __NR_kutrace_control = 1023;
+
 u64 inline DoControl(u64 command, u64 arg)
 {
   return syscall(__NR_kutrace_control, command, arg);
