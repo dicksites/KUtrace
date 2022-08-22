@@ -124,6 +124,8 @@ static const uint64 kMAX_PLAUSIBLE_DURATION = 800000000LL;	// 8 sec in multiples
 static const uint64 kONE_MINUTE_DURATION =   6000000000LL;	// 60 sec in multiples of 10 nsec
 static const uint64 kONE_HOUR =            360000000000LL;	// 3600 sec in multiples of 10 nsec
 
+static const int kDefaultLowResNsec10 = 35;	// Low-res riscv: 0 dur => 350 nsec instead 
+
 // We allow 26 waiting reasons, a-z, each displayed as Morse code
 static const char* kWAIT_NAMES[26] = {
   "wait_a", "wait_b", "wait_cpu", "wait_disk",
@@ -480,6 +482,7 @@ bool verbose = false;
 bool trace = false;
 bool rel0 = false;
 bool is_rpi = false;		// True for Raspberry Pi
+bool is_low_res_ts = false;	// True for Riscv u74
 
 string kernel_version;
 string cpu_model_name;
@@ -998,6 +1001,12 @@ void FinishSpan(const OneSpan& event, OneSpan* span) {
   // Prior span duration is up until new event timestamp
   span->duration = event.start_ts - span->start_ts;
 
+  // If low-resolution timer, we may get a legitimate span of zero duration.
+  // Set it to a minimum value
+  if ((span->duration == 0) && is_low_res_ts) {
+    span->duration = kDefaultLowResNsec10;
+  }
+
   // CHECK NEGATIVE or TOO LRAGE
   if (span->duration > kMAX_PLAUSIBLE_DURATION) {	// 8 sec in 10 nsec increments
     // Too big to be plausible with timer interrupts every 10 msec or less,
@@ -1006,7 +1015,7 @@ void FinishSpan(const OneSpan& event, OneSpan* span) {
     span->duration = 1;			// 10 nsec
 
     if (event.start_ts < span->start_ts) {
-      // Force negative span to short positive
+      // Force negative span to short positive, above
       //fprintf(stderr, "BUG %llu .. %llu, duration negative, %lld0ns\n",
       //        span->start_ts, event.start_ts, span->duration);
     } else {
@@ -1414,6 +1423,8 @@ void WaitBeforeWakeup(const OneSpan& event, CPUState* cpustate, PerPidState* per
     letter = 't';		// timer
   } else if (stack->name[stack->top] == "arch_timer") {		// Rpi time
     letter = 't';		// timer
+  } else if (stack->name[stack->top] == "riscv-timer") {	// Risc-v time
+    letter = 't';		// timer
   } else if (stack->name[stack->top] == "page_fault") {	// memory
     letter = 'm';		// memory
   } else if (stack->name[stack->top] == "mmap") {
@@ -1618,7 +1629,7 @@ void ProcessEvent(const OneSpan& event,
   // Normally, rawtoevent propogates the RPCID from these events to subsequent events.
   // Unfortunately, this doesn't track across context switches when an active RPC is
   // preempted and then later resumed.
-  // So instead, we completely reconstruct rpcid here in eventtospan3, usin gnot event.rpcid
+  // So instead, we completely reconstruct rpcid here in eventtospan3, using not event.rpcid
   // but thiscpu->rpcid, which is saved and restored across context switches.
   // An RPC event sets thiscpu->rpcid, and thiscpu->rpcid overrides event.rpc otherwise
 
@@ -1884,7 +1895,8 @@ if (verbose) fprintf(stdout, " ===marking old stack ambiguous at ctx_switch to %
   if (thiscpu->valid_span) {
     FinishSpan(event, &thiscpu->cur_span);
     // Suppress idle spans of length zero or exactly 10ns
-    bool suppress = ((thiscpu->cur_span.duration <= 1) && IsAnIdlenum(thiscpu->cur_span.eventnum));
+    bool suppress = ((thiscpu->cur_span.duration <= 1) && 
+                     IsAnIdlenum(thiscpu->cur_span.eventnum));
     if (!suppress) {WriteSpanJson(stdout, thiscpu);}	// Previous span
   }
 
@@ -2806,6 +2818,10 @@ int main (int argc, const char** argv) {
         // If the model is Raspberry, set pstate_is_all_cpus
         if (strstr(temp_name, "Raspberry") != NULL) {
           is_rpi = true;
+        }
+        // If the model is Riscv u74 chip, set low resolution timestamps
+        if (strstr(temp_name, "u74-mc") != NULL) {
+          is_low_res_ts = true;
         }
         cpu_model_name = string(temp_name);
         ////if (temp_ts == -1) {fprintf(stderr, "cpu_model_name = %s\n", temp_name);}

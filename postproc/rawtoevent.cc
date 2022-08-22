@@ -11,6 +11,8 @@
 //   od -Ax -tx8z -w32 foo.trace
 //
 // dsites 2022.05.23 Add FreeBSD tweaks
+// dsites 2022.08.19 Add RISC-V tweaks
+// dsites 2022.08.19 Add RPi tweaks
 //
 
 
@@ -56,18 +58,20 @@ bool keep_idle = false;
 //static const uint64 FINDME = 1305990942;
 static const uint64 FINDME = 0;
 
-
 static const bool TRACEWRAP = false;
+static const int kMAX_CPUS = 80;
+static const int mhz_32bit_counts = 54;
+static const int kNetworkMbPerSec = 1000;	// Default: 1 Gb/s
+static const int kDefaultLowResNsec10 = 35;	// Low-res riscv: 0 dur => 350 nsec instead 
 
-static const int kMAX_CPUS = 160;
-
-static const int mhz_32bit_cycles = 54;
-
-static const int kNetworkMbPerSec = 1000;		// Default: 1 Gb/s
+// For sanity checks
+static const uint64 usec_per_100_years = 1000000LL * 86400 * 365 * 100;  // Thru ~2070
 
 // Large ts difference means slightly backward time
 static const uint64 kLargeTsdelta = 2000000000;	
 
+// For dealing with riscv poor-resolution sifive u74-mc clock (1MHz)
+bool is_low_res_ts = false;		// True for Riscv u74 1 MHz timestamp
 
 // Version 3 all values are pre-shifted
 
@@ -533,6 +537,166 @@ uint64 RemapIdlePid(uint64 fbpid, const U64set* idle_pids) {
   return ( (idle_pids->find(fbpid) != idle_pids->end()) ? 0 : fbpid );
 }
 
+
+//   +-------+-----------------------+-------------------------------+
+//   | cpu#  |                  cycle counter                        | 0 module
+//   +-------+-----------------------+-------------------------------+
+//   | flags |                  gettimeofday                         | 1 DoDump
+//   +-------------------------------+-------------------------------+
+//   |                      start cycle counter                      | 2 DoDump
+//   +-------------------------------+-------------------------------+
+//   |                      start gettimeofday                       | 3 DoDump
+//   +-------------------------------+-------------------------------+
+//   |                       stop cycle counter                      | 4 DoDump
+//   +-------------------------------+-------------------------------+
+//   |                       stop gettimeofday                       | 5 DoDump
+//   +-------------------------------+-------------------------------+
+//   |                          u n u s e d                          | 6
+//   +-------------------------------+-------------------------------+
+//   |                          u n u s e d                          | 7
+//   +-------------------------------+-------------------------------+
+
+// If very first block, pick out time conversion parameters
+// First block has extra time fields. We do sanity checking here.
+bool handle_very_first_block (uint64* traceblock, uint64* base_usec_timestamp, CyclesToUsecParams* params) {
+      int64 start_counts = traceblock[2];
+      int64 start_usec = traceblock[3];
+      int64 stop_counts = traceblock[4];
+      int64 stop_usec = traceblock[5];
+      uint64 base_minute_usec, base_minute_cycle, base_minute_shift;
+
+      *base_usec_timestamp = start_usec;
+      bool fail = false;
+      
+      int64 delta_counts = stop_counts - start_counts;
+      int64 delta_usec = stop_usec - start_usec;
+      if (delta_usec <= 0) {delta_usec = 1;}	// Avoid zdiv
+      double counts_per_usec = (delta_counts * 1.0) / delta_usec;
+
+      // We have some possible fixups to do on the time counter values
+      // riscv can have 1MHz counts that fit in 32 bits
+      // RPi arm-32 can have 54MHz counts that are truncated to 32 bits
+      bool has_32bit_counts = ((start_counts | stop_counts) & 0xffffffff00000000llu) == 0;
+      bool likely_rpi =   (memmem((uint8*)traceblock, 256, "Raspberry", 9) != NULL);
+      bool likely_riscv = (memmem((uint8*)traceblock, 256, "u74-mc", 6) != NULL);
+
+      // Risc-v fixup: u74 chip sometimes sets bogus bit<32> in stop cycles, so 4GB too large
+      if (likely_riscv) {
+        //fprintf(stderr, "likely riscv\n");
+        //fprintf(stderr, "start_counts %016llx\n", start_counts);
+        //fprintf(stderr, "stop_counts  %016llx\n", stop_counts);
+        if ((counts_per_usec > 100.1) && 
+            ((start_counts >> 32) == 0) &&
+            ((stop_counts >> 32) == 1) ) {
+          stop_counts &= 0x00000000FFFFFFFFLL;
+          delta_counts = stop_counts - start_counts;
+          counts_per_usec = (delta_counts * 1.0) / delta_usec;
+          // fprintf(stderr, "counts per usec %3.1f MHz\n", counts_per_usec);
+          fprintf(stderr, "rawtoevent: RISC-V fixup done.\n");
+        }
+      }
+
+      // Arm-32 fixup:
+      // For Arm-32, the "cycle" counter is only 32 bits at 54 MHz, so wraps
+      // about every 79 seconds. This can leave stop_counts small by a few
+      // multiples of 4G. We do a fix here for exactly 54 MHz. Later, we could 
+      // find or take as input a different approximate counter frequency.
+      // These traces likely are missing the Raspberry model name
+      if (has_32bit_counts && !likely_riscv) {
+        //fprintf(stderr, "likely arm-32\n");
+        //fprintf(stderr, "rawtoevent: has_32bit_counts\n");
+        uint64 elapsed_usec = (uint64)(delta_usec);
+        uint64 elapsed_counts = (uint64)(delta_counts);
+        uint64 expected_counts = elapsed_usec * mhz_32bit_counts;
+        // Pick off the high bits
+        uint64 approx_hi = expected_counts & 0xffffffff00000000llu;
+        // Put them in
+        stop_counts |= (int64)approx_hi;
+        // Cross-check and change by 1 if right at a boundary
+        // and off by more than 12.5% from expected MHz
+        elapsed_counts = (uint64)(stop_counts - start_counts);
+        uint64 ratio = elapsed_counts / elapsed_usec;
+        if (ratio > (mhz_32bit_counts + (mhz_32bit_counts >> 3))) {
+          // High ratio; lower stop point
+          stop_counts -= 0x0000000100000000llu;
+        }
+        if (ratio < (mhz_32bit_counts - (mhz_32bit_counts >> 3))) {
+          // Low ratio; raise stop point
+          stop_counts += 0x0000000100000000llu;
+        }
+        delta_counts = stop_counts - start_counts;
+        counts_per_usec = (delta_counts * 1.0) / delta_usec;
+        fprintf(stderr, "rawtoevent: RPi fixup done.\n");
+      }
+      
+      // Record where we stand 
+      //fprintf(stderr, "# counts per second %3.1f MHz\n", counts_per_usec);
+      //fprintf(stdout, "# counts per second %3.1f MHz\n", counts_per_usec);
+      if (counts_per_usec < 10.0) {
+        fprintf(stderr, "rawtoevent: ... Low-resolution timestamps ...\n");
+      }
+      
+      if (verbose || hexevent) {
+        fprintf(stdout, "%% %016llx = %lldcy %lldus (%lld mod 1min)\n", 
+          traceblock[2], start_counts, start_usec, start_usec % 60000000l);
+        fprintf(stdout, "%% %016llx\n", traceblock[3]);
+        fprintf(stdout, "%% %016llx = %lldcy %lldus (%lld mod 1min)\n", 
+          traceblock[4], stop_counts, stop_usec, stop_usec % 60000000l);
+        fprintf(stdout, "%% %016llx\n", traceblock[5]);
+        fprintf(stdout, "%% %016llx unused\n", traceblock[6]);
+        fprintf(stdout, "%% %016llx unused\n", traceblock[7]);
+        fprintf(stdout, "\n");
+      }
+
+      // Now do some error checking 
+      if (counts_per_usec < 0.99) {
+        fprintf(stderr, "rawtoevent Fail: cycles per us %3.1f < 0.99 MHz\n", counts_per_usec);
+        fail = true;
+      }
+      if (counts_per_usec > 100.1) {
+        fprintf(stderr, "rawtoevent Fail: cycles per us %3.1f > 100.1 MHz\n", counts_per_usec);
+        fail = true;
+      }
+
+      // More sanity checks. If fail, ignore this block
+      int blocknumber = 0;
+      if (start_counts > stop_counts) {
+        fprintf(stderr, "rawtoevent FAIL: block[%d] start_cy > stop_cy %lld %lld\n", blocknumber, start_counts, stop_counts);
+        fail = true;
+      }
+      if (start_usec > stop_usec) {
+        fprintf(stderr, "rawtoevent FAIL: block[%d] start_usec > stop_usec %lld %lld\n", blocknumber, start_usec, stop_usec);
+        fail = true;
+      }
+      if (usec_per_100_years <= start_counts) {
+        fprintf(stderr, "rawtoevent FAIL: block[%d] start_counts crazy large %016llx \n", blocknumber, start_counts);
+        fail = true;
+      }
+      if (usec_per_100_years <= stop_counts) {
+        fprintf(stderr, "rawtoevent FAIL: block[%d] stop_counts crazy large %016llx \n", blocknumber, stop_counts);
+        fail = true;
+      }
+
+      if (fail) {
+        fprintf(stderr, "rawtoevent **** FAIL in block[0] is fatal ****\n");
+        fprintf(stderr, "     %016llx %016llx\n",traceblock[0], traceblock[1]);
+        exit(0);
+      }
+
+      // Map start_counts <==> start_usec
+      SetParams(start_counts, start_usec, stop_counts, stop_usec, params);
+
+      // Round usec down to multiple of 1 minute
+      base_minute_usec = (start_usec / 60000000) * 60000000;  
+      // Backmap base_minute_usec to cycles
+      base_minute_cycle = UsecToCycles(base_minute_usec, *params);
+
+      // Now instead map base_minute_cycle <==> 0
+      SetParams10(base_minute_cycle, 0, params);
+
+  return fail;
+}
+
 //
 // Usage: rawtoevent <trace file name>
 //
@@ -562,7 +726,7 @@ int main (int argc, const char** argv) {
 
   // Start timepair is set by DoInit
   // Stop timepair is set by DoOff
-  // If start_cycles is zero, we got here directly without calling DoInit, 
+  // If start_counts is zero, we got here directly without calling DoInit, 
   // which was done in some earlier run of this program. In that case, go 
   // find the start pair as the first real trace entry in the first trace block.
   CyclesToUsecParams params;
@@ -599,7 +763,6 @@ int main (int argc, const char** argv) {
 
   int blocknumber = 0;
   uint64 base_minute_usec, base_minute_cycle, base_minute_shift;
-  bool unshifted_word_0 = false;
 
   // Need this to sort in front of allthe timestamps
   fprintf(stdout, "# ## VERSION: %d\n", kRawVersionNumber);
@@ -645,9 +808,6 @@ int main (int argc, const char** argv) {
     uint8 flags = traceblock[1] >> 56;
     uint64 gtod = traceblock[1] & 0x00fffffffffffffful;
 
-    // Sanity check. If fail, ignore this block
-    static const uint64 usec_per_100_years = 1000000LL * 86400 * 365 * 100;  // Thru ~2070
-
     bool fail = false;
     if (kMAX_CPUS <= current_cpu) {
       fprintf(stderr, "rawtoevent FAIL: block[%d] CPU number %lld > max %d\n", blocknumber, current_cpu, kMAX_CPUS);
@@ -687,129 +847,9 @@ int main (int argc, const char** argv) {
     bool very_first_block = (blocknumber == 0);
     if (very_first_block) {
       first_real_entry = 8;
-
-      int64 start_cycles = traceblock[2];
-      int64 start_usec = traceblock[3];
-      int64 stop_cycles = traceblock[4];
-      int64 stop_usec = traceblock[5];
-      base_usec_timestamp = start_usec;
-      
-      fprintf(stdout, "# time1 start_cycles %016llx\n", start_cycles);
-      fprintf(stdout, "# time2 stop_cycles  %016llx\n", stop_cycles);
-      fprintf(stdout, "# time3 start_usec   %016llx %s\n", start_usec, FormatUsecDateTime(start_usec));
-      fprintf(stdout, "# time4 stop_usec    %016llx %s\n", stop_usec, FormatUsecDateTime(stop_usec));
-      double diff_cycles = stop_cycles - start_cycles;
-      double diff_usec = stop_usec - start_usec;
-      if (diff_cycles <= 0.0) {diff_cycles = 1.0;}		// avoid zdiv
-      fprintf(stdout, "# time5 counts %2.0lf, usec %2.0lf, nsec/count %3.1lf\n", 
-              diff_cycles, diff_usec, diff_usec * 1000.0 / diff_cycles);
-      
-      // For Arm-32, the "cycle" counter is only 32 bits at 54 MHz, so wraps about every 75 seconds.
-      // This can leave stop_cycles small by a few multiples of 4G. We do a termpoary fix here
-      // for exactly 54 MHz. Later, we could find or take as input a different approximate 
-      // counter frequency.
-      bool has_32bit_cycles = ((start_cycles | stop_cycles) & 0xffffffff00000000llu) == 0;
-      if (has_32bit_cycles) {
-fprintf(stderr, "rawtoevent: has_32bit_cycles\n");
-        uint64 elapsed_usec = (uint64)(stop_usec - start_usec);
-        uint64 elapsed_cycles = (uint64)(stop_cycles - start_cycles);
-        uint64 expected_cycles = elapsed_usec * mhz_32bit_cycles;
-fprintf(stderr, "  elapsed usec    %lld\n", elapsed_usec);
-fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
-fprintf(stderr, "  expected cycles %lld\n", expected_cycles);
-        // Pick off the high bits
-        uint64 approx_hi = expected_cycles & 0xffffffff00000000llu;
-        // Put them in
-        stop_cycles |= (int64)approx_hi;
-        // Cross-check and change by 1 if right at a boundary
-        // and off by more than 12.5% from expected MHz
-        elapsed_cycles = (uint64)(stop_cycles - start_cycles);
-fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
-        uint64 ratio = elapsed_cycles / elapsed_usec;
-fprintf(stderr, "  ratio  %lld\n", ratio);
-        if (ratio > (mhz_32bit_cycles + (mhz_32bit_cycles >> 3))) {stop_cycles -= 0x0000000100000000llu;}
-        if (ratio < (mhz_32bit_cycles - (mhz_32bit_cycles >> 3))) {stop_cycles += 0x0000000100000000llu;}
-        elapsed_cycles = (uint64)(stop_cycles - start_cycles);
-fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
-      }
-
-      if (verbose || hexevent) {
-        fprintf(stdout, "%% %016llx = %lldcy %lldus (%lld mod 1min)\n", 
-          traceblock[2], start_cycles, start_usec, start_usec % 60000000l);
-        fprintf(stdout, "%% %016llx\n", traceblock[3]);
-        fprintf(stdout, "%% %016llx = %lldcy %lldus (%lld mod 1min)\n", 
-          traceblock[4], stop_cycles, stop_usec, stop_usec % 60000000l);
-        fprintf(stdout, "%% %016llx\n", traceblock[5]);
-        fprintf(stdout, "%% %016llx unused\n", traceblock[6]);
-        fprintf(stdout, "%% %016llx unused\n", traceblock[7]);
-        fprintf(stdout, "\n");
-      }
-
-//   +-------+-----------------------+-------------------------------+
-//   | cpu#  |                  cycle counter                        | 0 module
-//   +-------+-----------------------+-------------------------------+
-//   | flags |                  gettimeofday                         | 1 DoDump
-//   +-------------------------------+-------------------------------+
-//   |                      start cycle counter                      | 2 DoDump
-//   +-------------------------------+-------------------------------+
-//   |                      start gettimeofday                       | 3 DoDump
-//   +-------------------------------+-------------------------------+
-//   |                       stop cycle counter                      | 4 DoDump
-//   +-------------------------------+-------------------------------+
-//   |                       stop gettimeofday                       | 5 DoDump
-//   +-------------------------------+-------------------------------+
-//   |                          u n u s e d                          | 6
-//   +-------------------------------+-------------------------------+
-//   |                          u n u s e d                          | 7
-//   +-------------------------------+-------------------------------+
-
-      // More sanity checks. If fail, ignore this block
-      if (start_cycles > stop_cycles) {
-        fprintf(stderr, "rawtoevent FAIL: block[%d] start_cy > stop_cy %lld %lld\n", blocknumber, start_cycles, stop_cycles);
-//VERYTEMP Arm32 wraparound 32-bit counter
-// TODO: if cycle counter values afre all 32-bit, increase stop_cycles until 
-//  apparent frequency vs. timeofday is between 25 and 100 MHz (10-40 nsec)
-        // fail = true;
-      }
-      if (start_usec > stop_usec) {
-        fprintf(stderr, "rawtoevent FAIL: block[%d] start_usec > stop_usec %lld %lld\n", blocknumber, start_usec, stop_usec);
-        fail = true;
-      }
-      if (usec_per_100_years <= start_cycles) {
-        fprintf(stderr, "rawtoevent FAIL: block[%d] start_cycles crazy large %016llx \n", blocknumber, start_cycles);
-        fail = true;
-      }
-      if (usec_per_100_years <= stop_cycles) {
-        fprintf(stderr, "rawtoevent FAIL: block[%d] stop_cycles crazy large %016llx \n", blocknumber, stop_cycles);
-        fail = true;
-      }
-
-      if (fail) {
-        fprintf(stderr, "rawtoevent **** FAIL in block[0] is fatal ****\n");
-        fprintf(stderr, "     %016llx %016llx\n",traceblock[0], traceblock[1]);
-        exit(0);
-      }
-
-      uint64 block_0_cycle = traceblock[0] & 0x00fffffffffffffful;
-      if ((block_0_cycle / start_cycles) > 1) {
-        // Looks like bastard file: word 0 is unshifted by mistake
-        unshifted_word_0 = true;
-        first_real_entry = 6;
-      }
-
-      // Map start_cycles <==> start_usec
-      SetParams(start_cycles, start_usec, stop_cycles, stop_usec, &params);
-
-      // Round usec down to multiple of 1 minute
-      base_minute_usec = (start_usec / 60000000) * 60000000;  
-      // Backmap base_minute_usec to cycles
-      base_minute_cycle = UsecToCycles(base_minute_usec, params);
-
-      // Now instead map base_minute_cycle <==> 0
-      SetParams10(base_minute_cycle, 0, &params);
-
       first_flags = flags;
-    }	// End of block[0] preprocessing
+      fail |= handle_very_first_block(traceblock, &base_usec_timestamp, &params);
+    }
 
     if (fail) {
       fprintf(stderr, "rawtoevent **** FAIL -- skipping block[%d] ****\n", blocknumber);
@@ -824,7 +864,6 @@ fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
     unique_cpus.insert(current_cpu);	// stats
 
     // Pick out times for converting to 100Mhz
-    if (unshifted_word_0) {base_cycle >>= OLD_RDTSC_SHIFT;}
     uint64 prepend = base_cycle & ~0xfffff;
 
     // The base cycle count for this block may well be a bit later than the truncated time
@@ -853,7 +892,7 @@ fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
 //   |                                                               | 5 or 11 module
 //   +-------------------------------+-------------------------------+
 
-    if ((TracefileVersion(first_flags) >= 3) && !unshifted_word_0) {
+    if (TracefileVersion(first_flags) >= 3) {
       /* Every block has PID and pidname at the front */
       /* CPU frequency may be in the first block per CPU, in the high half of pid */
       uint64 pid = traceblock[first_real_entry + 0] & 0x00000000ffffffffLLU;
@@ -1103,6 +1142,9 @@ fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
           
           // Remember the name, except throw away the empty name
           string name = string(tempstring);
+          if (is_modelnamedef(n)) {
+            is_low_res_ts = (name.find("u74-mc") != 0);
+          }
           name = ReduceSpaces(name);
           name = MakeSafeAscii(name);
           if (!name.empty()) {
@@ -1114,11 +1156,11 @@ fprintf(stderr, "  elapsed cycles  %lld\n", elapsed_cycles);
           // (these vary in different historical traces)
           if (memcmp(tempstring, "local_timer", 11) == 0) {
             gTIMER_IRQ_EVENT = KUTRACE_IRQ | (arg & 0xffff);
-fprintf(stderr, "local_timer irq = %03x %d\n", gTIMER_IRQ_EVENT, gTIMER_IRQ_EVENT);
+//fprintf(stderr, "local_timer irq = %03x %d\n", gTIMER_IRQ_EVENT, gTIMER_IRQ_EVENT);
           }
           if (memcmp(tempstring, "-sched-", 7) == 0) {
             gSCHED_EVENT = KUTRACE_SYSCALL64 | (kutrace_map_nr(arg & 0xffff));
-fprintf(stderr, "-sched- syscall = %03x %d\n", gSCHED_EVENT, gSCHED_EVENT);
+//fprintf(stderr, "-sched- syscall = %03x %d\n", gSCHED_EVENT, gSCHED_EVENT);
           }
         }
         i += (len - 1);	// Skip over the rest of the name event
@@ -1178,6 +1220,9 @@ fprintf(stderr, "-sched- syscall = %03x %d\n", gSCHED_EVENT, gSCHED_EVENT);
         has_arg = true;
         // Optimized call with delta_t and retval
         duration = CyclesToNsec10(tfull + delta_t, params) - nsec10;
+        if (is_low_res_ts && (delta_t == 1)) {
+          duration = kDefaultLowResNsec10;
+        }
         if (duration == 0) {duration = 1;}	// We enforce here a minimum duration of 10ns
       } else {
         retval = 0;
