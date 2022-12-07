@@ -1,0 +1,12 @@
+RISC_V support
+dsites 2022.12.07
+
+Download the regular linux and postproc directories first. 
+Then update with the RISC-V specific files here. 
+
+Use the linux-5.15.14-patches here for updating the corresponding Linux kernel on RISC-V.
+
+Booting the Unmatched board may have improved now, but when I worked on this in early 2022,
+booting involved booting from an SD card, watching the serial line output, 
+and redirecting the boot early on to use linux from an installed (m.2) SSD, instead of
+the default freedom-u.
