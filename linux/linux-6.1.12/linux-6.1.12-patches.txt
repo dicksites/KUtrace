@@ -1,0 +1,857 @@
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index 3604074a878b..0d56e9ec0e48 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -46,6 +46,15 @@ config FORCE_DYNAMIC_FTRACE
+ 	  generic code, as other architectures still use it. But we
+ 	  only need to keep it around for x86_64. No need to keep it
+ 	  for x86_32. For x86_32, force DYNAMIC_FTRACE.
++
++config KUTRACE
++	bool "KUtrace kernel/user tracing"
++	depends on 64BIT
++	def_bool n
++	help
++	  Enables kernel/user transition tracing patches, in conjunction with 
++	  the kutrace_mod loadable module.
++
+ #
+ # Arch settings
+ #
+diff --git a/arch/x86/entry/common.c b/arch/x86/entry/common.c
+index 6c2826417b33..4320a759c9a9 100644
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@ -35,6 +35,8 @@
+ #include <asm/syscall.h>
+ #include <asm/irq_stack.h>
+ 
++#include <linux/kutrace.h>
++
+ #ifdef CONFIG_X86_64
+ 
+ static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
+@@ -47,9 +49,36 @@ static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
+ 
+ 	if (likely(unr < NR_syscalls)) {
+ 		unr = array_index_nospec(unr, NR_syscalls);
+-		regs->ax = sys_call_table[unr](regs);
++
++		/* dsites 2023.02.18 track all syscalls and normal returns */
++		/* Pass in low 16 bits of call arg0 and return value */
++		kutrace1(KUTRACE_SYSCALL64 | kutrace_map_nr(nr), regs->di & 0xFFFFul);
++
++		regs->ax = sys_call_table[nr](regs);
++
++		/* dsites 2023.02.18 track all syscalls and normal returns */
++		/* Pass in low 16 bits of return value */
++		kutrace1(KUTRACE_SYSRET64 | kutrace_map_nr(nr), regs->ax & 0xFFFFul);
++
+ 		return true;
++
++#ifdef CONFIG_KUTRACE
++	/* dsites 2023.02.18 hook for controlling kutrace */
++	} else if ((nr == __NR_kutrace_control) && 
++	           (kutrace_global_ops.kutrace_trace_control != NULL)) {
++		BUILD_BUG_ON_MSG(NR_syscalls > __NR_kutrace_control, 
++				"__NR_kutrace_control is too small");
++		BUILD_BUG_ON_MSG(16 > TASK_COMM_LEN, 
++				"TASK_COMM_LEN is less than 16");
++		/* Calling kutrace_control(u64 command, u64 arg) */
++		/* see arch/x86/calling.h: */
++		/*  syscall arg0 in rdi (command), arg1 in rsi (arg) */
++		regs->ax = (*kutrace_global_ops.kutrace_trace_control)(
++			regs->di, regs->si);
++		return true;
++#endif
+ 	}
++
+ 	return false;
+ }
+ 
+diff --git a/arch/x86/kernel/acpi/cstate.c b/arch/x86/kernel/acpi/cstate.c
+index 401808b47af3..0ca2e51f658b 100644
+--- a/arch/x86/kernel/acpi/cstate.c
++++ b/arch/x86/kernel/acpi/cstate.c
+@@ -16,6 +16,8 @@
+ #include <asm/mwait.h>
+ #include <asm/special_insns.h>
+ 
++#include <linux/kutrace.h>
++
+ /*
+  * Initialize bm_flags based on the CPU cache properties
+  * On SMP it depends on cache configuration
+@@ -210,6 +212,7 @@ void __cpuidle acpi_processor_ffh_cstate_enter(struct acpi_processor_cx *cx)
+ 	struct cstate_entry *percpu_entry;
+ 
+ 	percpu_entry = per_cpu_ptr(cpu_cstate_entry, cpu);
++	kutrace1(KUTRACE_MWAIT, percpu_entry->states[cx->index].eax);
+ 	mwait_idle_with_hints(percpu_entry->states[cx->index].eax,
+ 	                      percpu_entry->states[cx->index].ecx);
+ }
+diff --git a/arch/x86/kernel/apic/apic.c b/arch/x86/kernel/apic/apic.c
+index 20d9a604da7c..1dadf7aba9a7 100644
+--- a/arch/x86/kernel/apic/apic.c
++++ b/arch/x86/kernel/apic/apic.c
+@@ -63,6 +63,8 @@
+ #include <asm/irq_regs.h>
+ #include <asm/cpu.h>
+ 
++#include <linux/kutrace.h>
++
+ unsigned int num_processors;
+ 
+ unsigned disabled_cpus;
+@@ -1109,10 +1111,25 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_apic_timer_interrupt)
+ 	struct pt_regs *old_regs = set_irq_regs(regs);
+ 
+ 	ack_APIC_irq();
++
++	/* dsites 2023.02.18  */
++	kutrace1(KUTRACE_IRQ + LOCAL_TIMER_VECTOR, 0);
++
+ 	trace_local_timer_entry(LOCAL_TIMER_VECTOR);
+ 	local_apic_timer_interrupt();
+ 	trace_local_timer_exit(LOCAL_TIMER_VECTOR);
+ 
++	/* dsites 2023.02.18  */
++	kutrace1(KUTRACE_IRQRET + LOCAL_TIMER_VECTOR, 0);
++
++	/* dsites 2023.02.18 Trace return address -- we are also a profiler now */
++        /*  This call will also insert the current CPU frequency if available */
++#ifdef CONFIG_KUTRACE
++	if (kutrace_tracing) {
++		(*kutrace_global_ops.kutrace_trace_2)(KUTRACE_PC, 0, regs->ip);
++	}
++#endif
++
+ 	set_irq_regs(old_regs);
+ }
+ 
+diff --git a/arch/x86/kernel/apic/ipi.c b/arch/x86/kernel/apic/ipi.c
+index 2a6509e8c840..42ecef2f8e33 100644
+--- a/arch/x86/kernel/apic/ipi.c
++++ b/arch/x86/kernel/apic/ipi.c
+@@ -6,6 +6,8 @@
+ 
+ #include "local.h"
+ 
++#include <linux/kutrace.h>
++
+ DEFINE_STATIC_KEY_FALSE(apic_use_ipi_shorthand);
+ 
+ #ifdef CONFIG_SMP
+@@ -68,16 +70,21 @@ void native_smp_send_reschedule(int cpu)
+ 		WARN(1, "sched: Unexpected reschedule of offline CPU#%d!\n", cpu);
+ 		return;
+ 	}
++	kutrace1(KUTRACE_IPI, cpu);
+ 	apic->send_IPI(cpu, RESCHEDULE_VECTOR);
+ }
+ 
+ void native_send_call_func_single_ipi(int cpu)
+ {
++	kutrace1(KUTRACE_IPI, cpu);
+ 	apic->send_IPI(cpu, CALL_FUNCTION_SINGLE_VECTOR);
+ }
+ 
+ void native_send_call_func_ipi(const struct cpumask *mask)
+ {
++	/* Use CPU 0 as a placeholder to indicate when mask was sent */
++	kutrace1(KUTRACE_IPI, 0);
++
+ 	if (static_branch_likely(&apic_use_ipi_shorthand)) {
+ 		unsigned int cpu = smp_processor_id();
+ 
+diff --git a/arch/x86/kernel/irq.c b/arch/x86/kernel/irq.c
+index 766ffe3ba313..e1718476c718 100644
+--- a/arch/x86/kernel/irq.c
++++ b/arch/x86/kernel/irq.c
+@@ -26,6 +26,8 @@
+ #define CREATE_TRACE_POINTS
+ #include <asm/trace/irq_vectors.h>
+ 
++#include <linux/kutrace.h>
++
+ DEFINE_PER_CPU_SHARED_ALIGNED(irq_cpustat_t, irq_stat);
+ EXPORT_PER_CPU_SYMBOL(irq_stat);
+ 
+@@ -242,6 +244,8 @@ DEFINE_IDTENTRY_IRQ(common_interrupt)
+ 	struct pt_regs *old_regs = set_irq_regs(regs);
+ 	struct irq_desc *desc;
+ 
++	kutrace1(KUTRACE_IRQ + (vector & 0xFF), 0);
++
+ 	/* entry code tells RCU that we're not quiescent.  Check it. */
+ 	RCU_LOCKDEP_WARN(!rcu_is_watching(), "IRQ failed to wake up RCU");
+ 
+@@ -260,6 +264,7 @@ DEFINE_IDTENTRY_IRQ(common_interrupt)
+ 		}
+ 	}
+ 
++	kutrace1(KUTRACE_IRQRET + (vector & 0xFF), 0);
+ 	set_irq_regs(old_regs);
+ }
+ 
+@@ -274,11 +279,13 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_x86_platform_ipi)
+ 	struct pt_regs *old_regs = set_irq_regs(regs);
+ 
+ 	ack_APIC_irq();
++	kutrace1(KUTRACE_IRQ + X86_PLATFORM_IPI_VECTOR, 0);
+ 	trace_x86_platform_ipi_entry(X86_PLATFORM_IPI_VECTOR);
+ 	inc_irq_stat(x86_platform_ipis);
+ 	if (x86_platform_ipi_callback)
+ 		x86_platform_ipi_callback();
+ 	trace_x86_platform_ipi_exit(X86_PLATFORM_IPI_VECTOR);
++	kutrace1(KUTRACE_IRQRET + X86_PLATFORM_IPI_VECTOR, 0);
+ 	set_irq_regs(old_regs);
+ }
+ #endif
+diff --git a/arch/x86/kernel/irq_work.c b/arch/x86/kernel/irq_work.c
+index 890d4778cd35..245620d951f3 100644
+--- a/arch/x86/kernel/irq_work.c
++++ b/arch/x86/kernel/irq_work.c
+@@ -13,14 +13,20 @@
+ #include <asm/trace/irq_vectors.h>
+ #include <linux/interrupt.h>
+ 
++#include <linux/kutrace.h>
++
+ #ifdef CONFIG_X86_LOCAL_APIC
+ DEFINE_IDTENTRY_SYSVEC(sysvec_irq_work)
+ {
+ 	ack_APIC_irq();
++
++	kutrace1(KUTRACE_IRQ + IRQ_WORK_VECTOR, 0);
+ 	trace_irq_work_entry(IRQ_WORK_VECTOR);
+ 	inc_irq_stat(apic_irq_work_irqs);
+ 	irq_work_run();
+ 	trace_irq_work_exit(IRQ_WORK_VECTOR);
++	kutrace1(KUTRACE_IRQRET + IRQ_WORK_VECTOR, 0);
++
+ }
+ 
+ void arch_irq_work_raise(void)
+diff --git a/arch/x86/kernel/smp.c b/arch/x86/kernel/smp.c
+index 06db901fabe8..52e273b8481d 100644
+--- a/arch/x86/kernel/smp.c
++++ b/arch/x86/kernel/smp.c
+@@ -34,6 +34,8 @@
+ #include <asm/kexec.h>
+ #include <asm/virtext.h>
+ 
++#include <linux/kutrace.h>
++
+ /*
+  *	Some notes on x86 processor bugs affecting SMP operation:
+  *
+@@ -225,28 +227,35 @@ static void native_stop_other_cpus(int wait)
+ DEFINE_IDTENTRY_SYSVEC_SIMPLE(sysvec_reschedule_ipi)
+ {
+ 	ack_APIC_irq();
++
++	kutrace1(KUTRACE_IRQ + RESCHEDULE_VECTOR, 0);
+ 	trace_reschedule_entry(RESCHEDULE_VECTOR);
+ 	inc_irq_stat(irq_resched_count);
+ 	scheduler_ipi();
+ 	trace_reschedule_exit(RESCHEDULE_VECTOR);
++	kutrace1(KUTRACE_IRQRET + RESCHEDULE_VECTOR, 0);
+ }
+ 
+ DEFINE_IDTENTRY_SYSVEC(sysvec_call_function)
+ {
+ 	ack_APIC_irq();
++	kutrace1(KUTRACE_IRQ + CALL_FUNCTION_VECTOR, 0);
+ 	trace_call_function_entry(CALL_FUNCTION_VECTOR);
+ 	inc_irq_stat(irq_call_count);
+ 	generic_smp_call_function_interrupt();
+ 	trace_call_function_exit(CALL_FUNCTION_VECTOR);
++	kutrace1(KUTRACE_IRQRET + CALL_FUNCTION_VECTOR, 0);
+ }
+ 
+ DEFINE_IDTENTRY_SYSVEC(sysvec_call_function_single)
+ {
+ 	ack_APIC_irq();
++	kutrace1(KUTRACE_IRQ + CALL_FUNCTION_SINGLE_VECTOR, 0);
+ 	trace_call_function_single_entry(CALL_FUNCTION_SINGLE_VECTOR);
+ 	inc_irq_stat(irq_call_count);
+ 	generic_smp_call_function_single_interrupt();
+ 	trace_call_function_single_exit(CALL_FUNCTION_SINGLE_VECTOR);
++	kutrace1(KUTRACE_IRQRET + CALL_FUNCTION_SINGLE_VECTOR, 0);
+ }
+ 
+ static int __init nonmi_ipi_setup(char *str)
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 7b0d4ab894c8..d74bd8ee27ae 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -37,6 +37,8 @@
+ #define CREATE_TRACE_POINTS
+ #include <asm/trace/exceptions.h>
+ 
++#include <linux/kutrace.h>
++
+ /*
+  * Returns 0 if mmiotrace is disabled, or if the fault is not
+  * handled by mmiotrace:
+@@ -1512,6 +1514,8 @@ handle_page_fault(struct pt_regs *regs, unsigned long error_code,
+ 	if (unlikely(kmmio_fault(regs, address)))
+ 		return;
+ 
++	kutrace1(KUTRACE_TRAP + KUTRACE_PAGEFAULT, 0);
++
+ 	/* Was the fault on kernel-controlled part of the address space? */
+ 	if (unlikely(fault_in_kernel_space(address))) {
+ 		do_kern_addr_fault(regs, error_code, address);
+@@ -1526,6 +1530,8 @@ handle_page_fault(struct pt_regs *regs, unsigned long error_code,
+ 		 */
+ 		local_irq_disable();
+ 	}
++
++	kutrace1(KUTRACE_TRAPRET + KUTRACE_PAGEFAULT, 0);
+ }
+ 
+ DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)
+diff --git a/drivers/acpi/acpi_pad.c b/drivers/acpi/acpi_pad.c
+index 02f1a1b1143c..cffe4d703025 100644
+--- a/drivers/acpi/acpi_pad.c
++++ b/drivers/acpi/acpi_pad.c
+@@ -21,6 +21,8 @@
+ #include <asm/mwait.h>
+ #include <xen/xen.h>
+ 
++#include <linux/kutrace.h>
++
+ #define ACPI_PROCESSOR_AGGREGATOR_CLASS	"acpi_pad"
+ #define ACPI_PROCESSOR_AGGREGATOR_DEVICE_NAME "Processor Aggregator"
+ #define ACPI_PROCESSOR_AGGREGATOR_NOTIFY 0x80
+@@ -172,6 +174,7 @@ static int power_saving_thread(void *data)
+ 			tick_broadcast_enter();
+ 			stop_critical_timings();
+ 
++			kutrace1(KUTRACE_MWAIT, power_saving_mwait_eax);
+ 			mwait_idle_with_hints(power_saving_mwait_eax, 1);
+ 
+ 			start_critical_timings();
+diff --git a/drivers/acpi/processor_idle.c b/drivers/acpi/processor_idle.c
+index 7bf882fcd64b..b6fbc0ba4447 100644
+--- a/drivers/acpi/processor_idle.c
++++ b/drivers/acpi/processor_idle.c
+@@ -25,6 +25,8 @@
+ #include <acpi/processor.h>
+ #include <linux/context_tracking.h>
+ 
++#include <linux/kutrace.h>
++
+ /*
+  * Include the apic definitions for x86 to have the APIC timer related defines
+  * available also for UP (on SMP it gets magically included via linux/smp.h).
+@@ -570,6 +572,7 @@ static void __cpuidle acpi_idle_do_entry(struct acpi_processor_cx *cx)
+ 		acpi_safe_halt();
+ 	} else {
+ 		/* IO port based C-state */
++		kutrace1(KUTRACE_MWAIT, 255);	/* Flag to make this patch distinctive */
+ 		inb(cx->address);
+ 		wait_for_freeze();
+ 	}
+diff --git a/drivers/idle/intel_idle.c b/drivers/idle/intel_idle.c
+index cfeb24d40d37..1b8bca39062f 100644
+--- a/drivers/idle/intel_idle.c
++++ b/drivers/idle/intel_idle.c
+@@ -58,6 +58,8 @@
+ #include <asm/msr.h>
+ #include <asm/fpu/api.h>
+ 
++#include <linux/kutrace.h>
++
+ #define INTEL_IDLE_VERSION "0.5.1"
+ 
+ static struct cpuidle_driver intel_idle_driver = {
+@@ -136,6 +138,7 @@ static __always_inline int __intel_idle(struct cpuidle_device *dev,
+ 	unsigned long eax = flg2MWAIT(state->flags);
+ 	unsigned long ecx = 1; /* break on interrupt flag */
+ 
++	kutrace1(KUTRACE_MWAIT, eax);
+ 	mwait_idle_with_hints(eax, ecx);
+ 
+ 	return index;
+@@ -226,6 +229,7 @@ static __cpuidle int intel_idle_s2idle(struct cpuidle_device *dev,
+ 	if (state->flags & CPUIDLE_FLAG_INIT_XSTATE)
+ 		fpu_idle_fpregs();
+ 
++	kutrace1(KUTRACE_MWAIT, eax);
+ 	mwait_idle_with_hints(eax, ecx);
+ 
+ 	return 0;
+diff --git a/fs/exec.c b/fs/exec.c
+index ab913243a367..ff03aa7ae3ef 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -75,6 +75,8 @@
+ 
+ #include <trace/events/sched.h>
+ 
++#include <linux/kutrace.h>
++
+ static int bprm_creds_from_file(struct linux_binprm *bprm);
+ 
+ int suid_dumpable = 0;
+@@ -1954,6 +1956,9 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 	}
+ 
+ 	retval = bprm_execve(bprm, fd, filename, flags);
++	/* Unconditionally put new pid name into trace */
++	kutrace_pidrename(current);
++
+ out_free:
+ 	free_bprm(bprm);
+ 
+diff --git a/include/linux/kutrace.h b/include/linux/kutrace.h
+new file mode 100644
+index 000000000000..8981cfde440b
+--- /dev/null
++++ b/include/linux/kutrace.h
+@@ -0,0 +1,184 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * include/linux/kutrace.h
++ *
++ * Author: Richard Sites <dick.sites@gmail.com>
++ * Signed-off-by: Richard Sites <dick.sites@gmail.com>
++ */
++
++#ifndef _LINUX_KUTRACE_H
++#define _LINUX_KUTRACE_H
++
++#include <linux/types.h>
++
++/* Take over last syscall number for controlling kutrace */
++#define __NR_kutrace_control 1023
++
++/* Take over last syscall number for tracing scheduler call/return */
++#define KUTRACE_SCHEDSYSCALL 1023
++
++/* kutrace_control() commands */
++#define KUTRACE_CMD_OFF 0
++#define KUTRACE_CMD_ON 1
++#define KUTRACE_CMD_FLUSH 2
++#define KUTRACE_CMD_RESET 3
++#define KUTRACE_CMD_STAT 4
++#define KUTRACE_CMD_GETCOUNT 5
++#define KUTRACE_CMD_GETWORD 6
++#define KUTRACE_CMD_INSERT1 7
++#define KUTRACE_CMD_INSERTN 8
++#define KUTRACE_CMD_GETIPCWORD 9
++#define KUTRACE_CMD_TEST 10
++#define KUTRACE_CMD_VERSION 11
++
++
++/* This is a *shortened* list of kernel-mode raw trace 12-bit event numbers */
++/* See user-mode kutrace_lib.h for the full set */
++
++/* Entry to provide names for PIDs */
++#define KUTRACE_PIDNAME       0x002
++
++
++// Specials are point events
++#define KUTRACE_USERPID       0x200  /* Context switch: new PID */
++#define KUTRACE_RPCIDREQ      0x201
++#define KUTRACE_RPCIDRESP     0x202
++#define KUTRACE_RPCIDMID      0x203
++#define KUTRACE_RPCIDRXPKT    0x204
++#define KUTRACE_RPCIDTXPKT    0x205
++#define KUTRACE_RUNNABLE      0x206  /* Set process runnable: PID */
++#define KUTRACE_IPI           0x207  /* Send IPI; receive is an interrupt */
++#define KUTRACE_MWAIT         0x208  /* C-states */
++#define KUTRACE_PSTATE        0x209  /* P-states */
++#define KUTRACE_RX_PKT        0x214  /* Raw packet received w/payload hash */ 
++#define KUTRACE_TX_PKT        0x215  /* Raw packet sent w/payload hash */
++#define KUTRACE_TSDELTA       0x21D  /* Delta to advance timestamp */
++
++
++/* Entry to provide a PC sample at timer interrupts (profiling) */
++#define KUTRACE_PC            0x280
++
++
++/* These are in blocks of 256 numbers */
++#define KUTRACE_TRAP      0x0400     /* AKA fault */
++#define KUTRACE_IRQ       0x0500
++#define KUTRACE_TRAPRET   0x0600
++#define KUTRACE_IRQRET    0x0700
++
++
++/* These are in blocks of 512 numbers */
++#define KUTRACE_SYSCALL64 0x0800
++#define KUTRACE_SYSRET64  0x0A00
++#define KUTRACE_SYSCALL32 0x0C00
++#define KUTRACE_SYSRET32  0x0E00
++
++/* Specific trap number for page fault */
++#define KUTRACE_PAGEFAULT  14
++
++/* Reuse the spurious_apic vector to show bottom halves exeuting */
++#define KUTRACE_BOTTOM_HALF	255
++
++/* Procedure interface to loadable module or compiled-in kutrace.c */
++struct kutrace_ops {
++	void (*kutrace_trace_1)(u64 num, u64 arg);
++	void (*kutrace_trace_2)(u64 num, u64 arg1, u64 arg2);
++	void (*kutrace_trace_many)(u64 num, u64 len, const char *arg);
++	u64 (*kutrace_trace_control)(u64 command, u64 arg);
++};
++
++/* Packet filter parameters */
++struct kutrace_nf {
++	u64 hash_init;
++	u64 hash_mask[3];
++};
++
++/* Per-cpu struct */
++struct kutrace_traceblock {
++	atomic64_t next;	/* Next u64 in current per-cpu trace block */
++	u64 *limit;		/* Off-the-end u64 in current per-cpu block */
++	u64 prior_cycles;	/* IPC tracking */
++	u64 prior_inst_retired;	/* IPC tracking */
++};
++
++
++#ifdef CONFIG_KUTRACE
++/* Global variables used by kutrace. Defined in kernel/kutrace/kutrace.c */
++extern bool kutrace_tracing;
++extern struct kutrace_ops kutrace_global_ops;
++extern u64 *kutrace_pid_filter;
++extern struct kutrace_nf kutrace_net_filter;
++
++/* Insert pid name if first time seen. Races don't matter here. */
++#define kutrace_pidname(next) \
++	if (kutrace_tracing) { \
++		pid_t pid16 = next->pid & 0xffff; \
++		pid_t pid_hi = pid16 >> 6; \
++		u64 pid_bit = 1ul << (pid16 & 0x3f); \
++		if ((kutrace_pid_filter[pid_hi] & pid_bit) == 0) { \
++			u64 name_entry[3]; \
++			name_entry[0] = pid16; \
++			memcpy(&name_entry[1], next->comm, 16); \
++			(*kutrace_global_ops.kutrace_trace_many)( \
++			 KUTRACE_PIDNAME, 3l, (const char*)&name_entry[0]); \
++			kutrace_pid_filter[pid_hi] |= pid_bit; \
++		} \
++	}
++
++/* Unconditionally insert or reset pid name. Races don't matter here. */
++#define kutrace_pidrename(next) \
++	if (kutrace_tracing) { \
++		pid_t pid16 = next->pid & 0xffff; \
++		pid_t pid_hi = pid16 >> 6; \
++		u64 pid_bit = 1ul << (pid16 & 0x3f); \
++		if (true) { \
++			u64 name_entry[3]; \
++			name_entry[0] = pid16; \
++			memcpy(&name_entry[1], next->comm, 16); \
++			(*kutrace_global_ops.kutrace_trace_many)( \
++			 KUTRACE_PIDNAME, 3l, (const char*)&name_entry[0]); \
++			kutrace_pid_filter[pid_hi] |= pid_bit; \
++		} \
++	}
++
++/* Filter packet payload and if passes insert 32-byte hash into trace */
++/* Mask first payload 24 bytes, XOR, and check for expected value */
++/* ku_payload may well not be 8-byte aligned, but only 4-byte */
++#define kutrace_pkttrace(rx_tx, ku_payload) \
++do { \
++	u64 hash = kutrace_net_filter.hash_init; \
++	hash ^= (ku_payload[0] & kutrace_net_filter.hash_mask[0]); \
++	hash ^= (ku_payload[1] & kutrace_net_filter.hash_mask[1]); \
++	hash ^= (ku_payload[2] & kutrace_net_filter.hash_mask[2]); \
++	hash ^= (hash >> 32); \
++	hash &= 0x00000000ffffffffLLU;	/* The filter hash */ \
++	if (hash == 0) { \
++		/* We passed the filter; now hash first 32 bytes and record */ \
++		hash = ku_payload[0] ^ ku_payload[1] ^ ku_payload[2] ^ ku_payload[3]; \
++		hash ^= (hash >> 32); \
++		hash &= 0x00000000ffffffffLLU; \
++		kutrace1(rx_tx, hash); \
++	} \
++} while(0);
++
++#define	kutrace1(event, arg) \
++	if (kutrace_tracing) { \
++		(*kutrace_global_ops.kutrace_trace_1)(event, arg); \
++	}
++
++/* map_nr moves 32-bit syscalls 0x200..3FF to 0x400..5FF */
++#define	kutrace_map_nr(nr) (nr + (nr & 0x200)) 
++
++#else
++
++#define	kutrace_pidname(next)
++#define	kutrace_pidrename(next)
++#define	kutrace1(event, arg)
++#define	kutrace_map_nr(nr) (nr) 
++
++#endif
++
++
++#endif /* _LINUX_KUTRACE_H */
++
++
++
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 10ef068f598d..ccc5c42a38c7 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -156,4 +156,6 @@ quiet_cmd_genikh = CHK     $(obj)/kheaders_data.tar.xz
+ $(obj)/kheaders_data.tar.xz: FORCE
+ 	$(call cmd,genikh)
+ 
++obj-$(CONFIG_KUTRACE) += kutrace/
++
+ clean-files := kheaders_data.tar.xz kheaders.md5
+diff --git a/kernel/kutrace/Makefile b/kernel/kutrace/Makefile
+new file mode 100644
+index 000000000000..74b83e738ab4
+--- /dev/null
++++ b/kernel/kutrace/Makefile
+@@ -0,0 +1,3 @@
++# dsites 2023.02.18
++obj-$(CONFIG_KUTRACE) += kutrace.o
++
+diff --git a/kernel/kutrace/kutrace.c b/kernel/kutrace/kutrace.c
+new file mode 100644
+index 000000000000..de44e770e868
+--- /dev/null
++++ b/kernel/kutrace/kutrace.c
+@@ -0,0 +1,41 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * kernel/kutrace/kutrace.c
++ *
++ * Author: Richard Sites <dick.sites@gmail.com>
++ * Signed-off-by: Richard Sites <dick.sites@gmail.com>
++ */
++
++/*
++ * Small hooks for a module that implements kernel/user tracing
++ * See include/linux/kutrace.h for struct definitions
++ *
++ * Most patches will be something like
++ *   kutrace1(event, arg)
++ *
++ */
++
++#include <linux/kutrace.h>
++#include <linux/kernel.h>
++#include <linux/percpu.h>
++#include <linux/types.h>
++
++bool kutrace_tracing = false;
++EXPORT_SYMBOL(kutrace_tracing);
++
++struct kutrace_ops kutrace_global_ops = {NULL, NULL, NULL, NULL};
++EXPORT_SYMBOL(kutrace_global_ops);
++
++u64* kutrace_pid_filter = NULL;
++EXPORT_SYMBOL(kutrace_pid_filter);
++
++struct kutrace_nf kutrace_net_filter = {0LLU, {0LLU, 0LLU, 0LLU}};
++EXPORT_SYMBOL(kutrace_net_filter);
++
++DEFINE_PER_CPU(struct kutrace_traceblock, kutrace_traceblock_per_cpu);
++EXPORT_PER_CPU_SYMBOL(kutrace_traceblock_per_cpu);
++
++
++
++
++
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 2a4918a1faa9..872338b7064b 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -95,6 +95,8 @@
+ #include "../../io_uring/io-wq.h"
+ #include "../smpboot.h"
+ 
++#include <linux/kutrace.h>
++
+ /*
+  * Export tracepoints that act as a bare tracehook (ie: have no trace event
+  * associated with them) to allow external modules to probe them.
+@@ -4138,6 +4140,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
+ 			goto out;
+ 
+ 		trace_sched_waking(p);
++		kutrace1(KUTRACE_RUNNABLE, p->pid);
+ 		WRITE_ONCE(p->__state, TASK_RUNNING);
+ 		trace_sched_wakeup(p);
+ 		goto out;
+@@ -4155,6 +4158,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
+ 		goto unlock;
+ 
+ 	trace_sched_waking(p);
++	kutrace1(KUTRACE_RUNNABLE, p->pid);
+ 
+ 	/*
+ 	 * Ensure we load p->on_rq _after_ p->state, otherwise it would
+@@ -6496,6 +6500,8 @@ static void __sched notrace __schedule(unsigned int sched_mode)
+ 	struct rq *rq;
+ 	int cpu;
+ 
++	kutrace1(KUTRACE_SYSCALL64 + kutrace_map_nr(KUTRACE_SCHEDSYSCALL), 0);
++
+ 	cpu = smp_processor_id();
+ 	rq = cpu_rq(cpu);
+ 	prev = rq->curr;
+@@ -6605,6 +6611,10 @@ static void __sched notrace __schedule(unsigned int sched_mode)
+ 
+ 		trace_sched_switch(sched_mode & SM_MASK_PREEMPT, prev, next, prev_state);
+ 
++		/* Put pid name into trace first time */
++		kutrace_pidname(next);
++		kutrace1(KUTRACE_USERPID, next->pid);
++
+ 		/* Also unlocks the rq: */
+ 		rq = context_switch(rq, prev, next, &rf);
+ 	} else {
+@@ -6614,6 +6624,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
+ 		__balance_callbacks(rq);
+ 		raw_spin_rq_unlock_irq(rq);
+ 	}
++	kutrace1(KUTRACE_SYSRET64 + kutrace_map_nr(KUTRACE_SCHEDSYSCALL), 0);
+ }
+ 
+ void __noreturn do_task_dead(void)
+diff --git a/kernel/softirq.c b/kernel/softirq.c
+index c8a6913c067d..974a63f5f5a9 100644
+--- a/kernel/softirq.c
++++ b/kernel/softirq.c
+@@ -33,6 +33,7 @@
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/irq.h>
+ 
++#include <linux/kutrace.h>
+ /*
+    - No shared variables, all the data are CPU local.
+    - If a softirq needs serialization, let it serialize itself
+@@ -567,9 +568,12 @@ asmlinkage __visible void __softirq_entry __do_softirq(void)
+ 
+ 		kstat_incr_softirqs_this_cpu(vec_nr);
+ 
++		kutrace1(KUTRACE_IRQ + KUTRACE_BOTTOM_HALF, vec_nr);
+ 		trace_softirq_entry(vec_nr);
+ 		h->action(h);
+ 		trace_softirq_exit(vec_nr);
++		kutrace1(KUTRACE_IRQRET + KUTRACE_BOTTOM_HALF, 0);
++
+ 		if (unlikely(prev_count != preempt_count())) {
+ 			pr_err("huh, entered softirq %u %s %p with preempt_count %08x, exited with %08x?\n",
+ 			       vec_nr, softirq_to_name[vec_nr], h->action,
+diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
+index cc072d2cfcd8..0e338263e525 100644
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -81,6 +81,8 @@
+ #include <net/busy_poll.h>
+ #include <net/mptcp.h>
+ 
++#include <linux/kutrace.h>
++
+ int sysctl_tcp_max_orphans __read_mostly = NR_FILE;
+ 
+ #define FLAG_DATA		0x01 /* Incoming frame contained data.		*/
+@@ -5849,6 +5851,19 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	unsigned int len = skb->len;
+ 
++/* Apply quick filter and if it passes, make a KUtrace entry for */
++/* rx packet. Use XOR of first 32 bytes as the recorded argument value */
++#ifdef CONFIG_KUTRACE
++	if (kutrace_tracing && ((20 + 32) <= len)) {
++		int ku_hdr_len = th->doff << 2;
++		const u64 *ku_payload = (u64*)(skb->data + ku_hdr_len);
++		int ku_payloadlen = len - ku_hdr_len;
++		if (32 <= ku_payloadlen) {
++			kutrace_pkttrace(KUTRACE_RX_PKT, ku_payload);
++		}
++        }
++#endif
++
+ 	/* TCP congestion window tracking */
+ 	trace_tcp_probe(sk, skb);
+ 
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+index 71d01cf3c13e..3680934b8b67 100644
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -46,6 +46,7 @@
+ #include <linux/static_key.h>
+ 
+ #include <trace/events/tcp.h>
++#include <linux/kutrace.h>
+ 
+ /* Refresh clocks of a TCP socket,
+  * ensuring monotically increasing values.
+@@ -1396,6 +1397,15 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
+ 
+ 	tcp_add_tx_delay(skb, tp);
+ 
++/* Apply quick filter and if it passes, make a KUtrace entry for tx packet. */
++/* Use XOR of first 32 bytes as the recorded argument value */
++#ifdef CONFIG_KUTRACE
++	if (kutrace_tracing && ((tcp_header_size + 32) <= skb->len)) {
++		const u64 *ku_payload = (u64*)(skb->data + tcp_header_size);
++		kutrace_pkttrace(KUTRACE_TX_PKT, ku_payload);
++        }
++#endif
++
+ 	err = INDIRECT_CALL_INET(icsk->icsk_af_ops->queue_xmit,
+ 				 inet6_csk_xmit, ip_queue_xmit,
+ 				 sk, skb, &inet->cork.fl);
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index 9592fe3e444a..976c6f16e8fe 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -117,6 +117,8 @@
+ #include <net/ipv6_stubs.h>
+ #endif
+ 
++#include <linux/kutrace.h>
++
+ struct udp_table udp_table __read_mostly;
+ EXPORT_SYMBOL(udp_table);
+ 
+@@ -975,6 +977,16 @@ static int udp_send_skb(struct sk_buff *skb, struct flowi4 *fl4,
+ 		uh->check = CSUM_MANGLED_0;
+ 
+ send:
++/* Apply quick filter and if it passes, make a KUtrace entry for tx packet. */
++/* Use XOR of first 32 bytes as the recorded argument value */
++#ifdef CONFIG_KUTRACE
++	if (kutrace_tracing && ((8 + 32) <= len)) {
++		int ku_hdr_len = 8;
++		const u64 *ku_payload = (u64*)((u8*)(uh) + ku_hdr_len);
++		kutrace_pkttrace(KUTRACE_TX_PKT, ku_payload);
++        }
++#endif
++
+ 	err = ip_send_skb(sock_net(sk), skb);
+ 	if (err) {
+ 		if (err == -ENOBUFS && !inet->recverr) {
+@@ -2450,6 +2462,17 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
+ 	if (udp4_csum_init(skb, uh, proto))
+ 		goto csum_error;
+ 
++/* Apply quick filter and if it passes, make a KUtrace entry for rx packet. */
++/* Use XOR of first 32 bytes as the recorded argument value */
++#ifdef CONFIG_KUTRACE
++	if (kutrace_tracing && ((8 + 32) <= ulen)) {
++		int ku_hdr_len = 8;
++		const u64 *ku_payload = (u64*)((u8*)(uh) + ku_hdr_len);
++		kutrace_pkttrace(KUTRACE_RX_PKT, ku_payload);
++        }
++
++#endif
++
+ 	sk = skb_steal_sock(skb, &refcounted);
+ 	if (sk) {
+ 		struct dst_entry *dst = skb_dst(skb);
