@@ -1,0 +1,8 @@
+Against
+git clone git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git linux-6.1.12 into lin6/linux-6.1.12
+
+apply the patch file and then run make menuconfig to turn on KUtrace (top-level third line in my .config). 
+If it is not enabled, there is no code inserted into the kernel.
+
+The patches are used in conjunction with a loadable module that turns tracing on and off and extracts raw binary 
+traces to a file. This and all the control and postprocessing code are above here in the directory structure.
