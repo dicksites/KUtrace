@@ -1372,7 +1372,9 @@ int main (int argc, const char** argv) {
         // using 511 for -sched- mismatched with a more recent kutrace_control_names.h
         // Fix them right here
         if (event == 0x9ff) {strcpy(temp, "-sched-");} 
+        if (event == 0xdff) {strcpy(temp, "-sched-");} 
         if (event == 0xbff) {strcpy(temp, "/-sched-");} 
+        if (event == 0xfff) {strcpy(temp, "/-sched-");} 
         name = string(temp);
       }
 
