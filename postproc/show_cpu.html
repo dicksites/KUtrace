@@ -378,7 +378,7 @@
 //----------------------------------------------------------------------------//
 
 // Version control for this file
-var script_edit_date = "(ver2022-07-14)";  // Shown in secondary menu for identification
+var script_edit_date = "(ver2023-03-11)";  // Shown in secondary menu for identification
 
 var book = false;		// Set true to get defaults for creating book diagrams
 
@@ -3845,6 +3845,7 @@ function resetzoom() {
     document.getElementById("debugtext").hidden = debug;
     debug = !debug;
     //presentation = !presentation;
+    return;
   }
 
   data.savedview[0][1] = packupState();
@@ -6218,6 +6219,10 @@ function redrawUI() {
     if (state.just_reset) {
       document.getElementById("matchcount").innerHTML = 
         data.kernelVersion + ", " + data.cpuModelName;
+      if (is_riscv) {
+          document.getElementById("debugout").innerHTML = 
+        "<span style=\"font-weight:bold; color:red\">LOW-RESOLUTION TIMER</span>";
+      }
     } else {
       document.getElementById("matchcount").innerHTML = "";
     }
@@ -8464,51 +8469,6 @@ function unloadSaveState() {
 <!-- All the drawing is done in an SVG element allocated inside here -->
 <span id="anchorsvg"></span>
 
-<br>
-
-<!-- Secondary menu, normally invisible. Toggle on/off wiith ctrl-click reddot -->
-<span id="debugtext" hidden>
-&nbsp;&nbsp;&nbsp;
-Aspect
-<input name="ShowAspect" type="text" maxlength="20" id="ShowAspect" class="ShowAspect"
-  onkeyup="keyupAspect(event)" value="0:0" style="width: 30px; background-color:#FFFFFF; text-align:center"/> 
-Ychars
-<input name="DebugRegion2Chars" type="text" maxlength="10" id="DebugRegion2Chars" class="DebugRegion2Chars" 
-  onkeyup="keyupDebugRegion2Chars(event)" style="width: 20px; background-color:#FFFFFF"/> 
-Ypx
-<input name="DebugRegion2Px" type="text" maxlength="10" id="DebugRegion2Px" class="DebugRegion2Px" 
-  onkeyup="keyupDebugRegion2Px(event)" style="width: 20px; background-color:#FFFFFF"/> 
-<!--
-rows
-<input name="DebugRows" type="text" maxlength="10" id="DebugRows" class="DebugRows"   
-  onkeyup="keyupDebugRows(event)" style="width: 20px; background-color:#FFFFFF"/> 
--->
-txt
-<input name="DebugTxt" type="text" maxlength="10" id="DebugTxt" class="DebugTxt" 
-  onkeyup="keyupDebugTxt(event)" style="width: 20px; background-color:#FFFFFF"/> 
-spn
-<input name="DebugSpn" type="text" maxlength="10" id="DebugSpn" class="DebugSps"   
-  onkeyup="keyupDebugSpn(event)" style="width: 20px; background-color:#FFFFFF"/> 
-
-
-&nbsp;
-<button id="legend"  style="border-radius:6px";>Legend</button>
-<button id="fade"  style="border-radius:6px";>Fade</button>
-<button id="callout"  style="border-radius:6px; font-weight: bold; background-color: white; color: black; border-color: rgb(192,192,192); ">&#x1f5e8;</button>
-<button id="export"  style="border-radius:6px";>Export</button>
-&nbsp;&nbsp;&nbsp;
-x:
-<span id="xstartwidth" style="font-family: sans-serif; font-size: 10pt"></span>
-&nbsp;
-y:
-<span id="ystartwidth" style="font-family: sans-serif; font-size: 10pt"></span>
-&nbsp;
-<span id="showversion" style="font-family: sans-serif; font-size: 10pt"></span>
-
-
-<br>
-</span>
-<!-- End Secondary menu -->
 
 <!--  
   // Six save/restore clickable items 
@@ -8607,6 +8567,50 @@ International Morse Code (for wait events)
   </span>
 
 </span>
+
+<br>
+
+<!-- Secondary menu, normally invisible. Toggle on/off wiith ctrl-click reddot -->
+<span id="debugtext" hidden>
+&nbsp;&nbsp;&nbsp;
+Aspect
+<input name="ShowAspect" type="text" maxlength="20" id="ShowAspect" class="ShowAspect"
+  onkeyup="keyupAspect(event)" value="0:0" style="width: 30px; background-color:#FFFFFF; text-align:center"/> 
+Ychars
+<input name="DebugRegion2Chars" type="text" maxlength="10" id="DebugRegion2Chars" class="DebugRegion2Chars" 
+  onkeyup="keyupDebugRegion2Chars(event)" style="width: 20px; background-color:#FFFFFF"/> 
+Ypx
+<input name="DebugRegion2Px" type="text" maxlength="10" id="DebugRegion2Px" class="DebugRegion2Px" 
+  onkeyup="keyupDebugRegion2Px(event)" style="width: 20px; background-color:#FFFFFF"/> 
+<!--
+rows
+<input name="DebugRows" type="text" maxlength="10" id="DebugRows" class="DebugRows"   
+  onkeyup="keyupDebugRows(event)" style="width: 20px; background-color:#FFFFFF"/> 
+-->
+txt
+<input name="DebugTxt" type="text" maxlength="10" id="DebugTxt" class="DebugTxt" 
+  onkeyup="keyupDebugTxt(event)" style="width: 20px; background-color:#FFFFFF"/> 
+spn
+<input name="DebugSpn" type="text" maxlength="10" id="DebugSpn" class="DebugSps"   
+  onkeyup="keyupDebugSpn(event)" style="width: 20px; background-color:#FFFFFF"/> 
+
+&nbsp;
+<button id="legend"  style="border-radius:6px";>Legend</button>
+<button id="fade"  style="border-radius:6px";>Fade</button>
+<button id="callout"  style="border-radius:6px; font-weight: bold; background-color: white; color: black; border-color: rgb(192,192,192); ">&#x1f5e8;</button>
+<button id="export"  style="border-radius:6px";>Export</button>
+&nbsp;&nbsp;&nbsp;
+x:
+<span id="xstartwidth" style="font-family: sans-serif; font-size: 10pt"></span>
+&nbsp;
+y:
+<span id="ystartwidth" style="font-family: sans-serif; font-size: 10pt"></span>
+&nbsp;
+<span id="showversion" style="font-family: sans-serif; font-size: 10pt"></span>
+
+<br>
+</span>
+<!-- End Secondary menu -->
 
  
 </body> 
