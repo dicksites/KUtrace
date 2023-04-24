@@ -1,5 +1,5 @@
 // Little user-mode library program to control kutracing 
-// Copyright 2021 Richard L. Sites
+// Copyright 2023 Richard L. Sites
 //
 
 #include <stdio.h>
@@ -36,10 +36,19 @@ namespace {
 // Module/code must be at least this version number for us to run
 static const u64 kMinModuleVersionNumber = 3;
 
+// Module/code must be at least this version number for us to use fast 4KB dump
+static const u64 kMin4KBModuleVersionNumber = 4;
+
 // This defines the format of the resulting trace file
 static const u64 kTracefileVersionNumber = 3;
 
-// Number of u64 values per trace block
+// NOTE: To use fast 4KB transfers out of trace buffer, 
+//  IPC block must be at least 4KB and thus trace block must be at least 32KB.
+
+// Number of u64 values per 4KB
+static const int k4KBSize = 512;
+
+// Number of u64 values per trace block (64KB)
 static const int kTraceBufSize = 8192;
 
 // Number of u64 values per IPC block, one u8 per u64 in trace buf
@@ -64,6 +73,7 @@ char hostname[GetbufSize];
 char linkspeed[GetbufSize];
 NumNamePair localirqpairs[256];	// At most 256 IRQ name/number pairs  
 irqname irqnames[256];		// At most 256 IRQ names
+
 
 // Useful utility routines
 int64 GetUsec() {
@@ -91,7 +101,7 @@ int64 GetUsec() {
                               : "memory");                      \
         __v;                                                    \
 })
-#endif /* __riscv */
+#endif
 
 
 /* Counts by one for each 64 cycles or so */
@@ -139,17 +149,21 @@ void GetTimePair(int64* cycles, int64* usec) {
 }
 
 
-void StripCRLF(char* s) {
-  int len = strlen(s);
-  if ((0 < len) && s[len - 1] == '\n') {s[len - 1] = '\0'; --len;}
-  if ((0 < len) && s[len - 1] == '\r') {s[len - 1] = '\0'; --len;}
-}
-
 // For the trace_control system call,
 // arg is declared to be u64. In reality, it is either a u64 or
 // a pointer to a u64, depending on the command. Caller casts as
 // needed, and the command implementations in kutrace_mod
 // cast back as needed.
+
+// These numbers must exactly match the numbers in kernel include file kutrace.h
+// This maps to highest syscall32 when 0x800 is added
+#define KUTRACE_SCHEDSYSCALL 1535
+
+void StripCRLF(char* s) {
+  int len = strlen(s);
+  if ((0 < len) && s[len - 1] == '\n') {s[len - 1] = '\0'; --len;}
+  if ((0 < len) && s[len - 1] == '\r') {s[len - 1] = '\0'; --len;}
+}
 
 //--------------------------------------------------------------------------------------// 
 // FreeBSD-specific routines
@@ -397,6 +411,64 @@ void GetLinkSpeed(char* linkspeed,int len) {
 }
 
 
+#if 0
+#if defined(__FreeBSD__)
+// FreeBSD syscalls are different.  The nice thing is that
+// we can dynamically register a system call.
+//
+// The not so nice thing is that we need to then look up
+// the syscall number which was assigned, and the even
+// less nice thing is that FreeBSD syscalls return ints,
+// so we have to copy out the return value
+
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/module.h>
+#include <sys/syscall.h>
+
+static int __NR_kutrace_control = -1;
+u64 inline DoControl(u64 command, u64 arg)
+{
+  u64 rval;
+  int err;
+
+  if (__predict_false(__NR_kutrace_control == -1)) {
+    struct module_stat ms;
+    int mod_id;
+
+    mod_id = modfind("sys/kutrace");
+    if (mod_id < 0) {
+      return (-1);
+    }
+    ms.version = sizeof(ms);
+    err = modstat(mod_id, &ms);
+    if (err < 0) {
+      return (-1);
+    }
+    __NR_kutrace_control = ms.data.intval;
+    if (__NR_kutrace_control < 0) {
+      return (-1);
+    }
+  }
+  err = syscall(__NR_kutrace_control, command, arg, &rval);
+  if (err != 0) {
+    return (-1);
+  }
+  return (rval);
+}
+#else
+
+// Not FreeBSD
+// These numbers must exactly match the numbers in kernel include file kutrace.h
+#define __NR_kutrace_control 1023	
+u64 inline DoControl(u64 command, u64 arg)
+{
+  return syscall(__NR_kutrace_control, command, arg);
+}
+#endif
+#endif
+
+
 // Sleep for n milliseconds
 void msleep(int msec) {
   struct timespec ts;
@@ -581,10 +653,6 @@ bool DoOn() {
 //   Interrupt number to name mapping
 //
 
-// TODO: Get interrupt <number, name> pairs from /proc/interrupt
-// TODO: Get Ethernet link speed from /sys/class/net/*/speed
-
-
 
 // Initialize trace buffer with syscall/irq/trap names
 // and processor model name, uname -rv
@@ -609,7 +677,7 @@ void DoInit(const char* process_name) {
   InsertVariableEntry(kernelversion, KUTRACE_KERNEL_VER, 0);
   InsertVariableEntry(modelname, KUTRACE_MODEL_NAME, 0);
   InsertVariableEntry(hostname, KUTRACE_HOST_NAME, 0);
-  InsertVariableEntry(linkspeed, KUTRACE_MBIT_SEC, 0);
+  //InsertVariableEntry(linkspeed, KUTRACE_MBIT_SEC, 0);	(incomplete)
 
   // Add trap/irq/syscall names into front of trace
   EmitNames(PidNames, KUTRACE_PIDNAME);
@@ -725,6 +793,8 @@ void DumpTimePair(const char* label, int64 cycles, int64 usec) {
 // Dump the trace buffer to filename
 // Module must be loaded. Tracing must be off
 void DoDump(const char* fname) {
+  bool livedump = DoTest();	// true if tracing is currently on
+
   // if (!TestModule()) {return;}		// No module loaded
   DoControl(KUTRACE_CMD_FLUSH, 0);
 
@@ -748,9 +818,23 @@ void DoDump(const char* fname) {
     wordcount = ~wordcount;
     did_wrap_around = true;
   }
-  u64 blockcount = wordcount >> 13;
+  u64 blockcount = wordcount >> 13;	// 8K words per block
 //fprintf(stderr, "wordcount = %ld\n", wordcount);
 //fprintf(stderr, "blockcount = %ld\n", blockcount);
+
+  // If module implements 4KB transfers, use those. 
+  bool use_4kb = (kIpcBufSize >= k4KBSize);
+  use_4kb &= (DoControl(KUTRACE_CMD_VERSION, 0) >= kMin4KBModuleVersionNumber);
+
+  // Live dump:
+  // To trace kutrace_control itself dumping, live dump does:
+  //   set the stop time pair, stop_cycles and stop_usec
+  //   unconditionally dump the first 1.75MB of the trace buffer
+  if (livedump) {
+    GetTimePair(&stop_cycles, &stop_usec);
+    blockcount = 28;
+    fprintf(stderr, "Live dump of 1.75MB\n");
+  }
 
   // Loop on trace blocks
   for (int i = 0; i < blockcount; ++i) {
@@ -758,16 +842,23 @@ void DoDump(const char* fname) {
     u64 k2 = i * kIpcBufSize;  	// IPC Word number to fetch next
 
     // Extract 64KB trace block
-    for (int j = 0; j < kTraceBufSize; ++j) {
-      traceblock[j] = DoControl(KUTRACE_CMD_GETWORD, k++);
+    if (use_4kb) {
+      for (int j = 0; j < kTraceBufSize; j += k4KBSize) {
+        DoControl(KUTRACE_CMD_SET4KB, k);
+        DoControl(KUTRACE_CMD_GET4KB, (u64)(&traceblock[j]));
+        k += k4KBSize;
+      }
+    } else {
+      for (int j = 0; j < kTraceBufSize; ++j) {
+        traceblock[j] = DoControl(KUTRACE_CMD_GETWORD, k++);
+      }
     }
 
     // traceblock[0] has cpu number and cycle counter
     // traceblock[1] has flags in top byte, then zeros
-    // We put the reconstructed gettimeofday value into traceblock[1] 
+    // We put the reconstructed getimeofday value into traceblock[1] 
     uint8 flags = traceblock[1] >> 56;
     bool this_block_has_ipc = ((flags & IPC_Flag) != 0);
-
 
     bool very_first_block = (i == 0);
     if (very_first_block) {
@@ -831,9 +922,18 @@ void DoDump(const char* fname) {
     // For each 64KB traceblock that has IPC_Flag set, also read the IPC bytes
     if (this_block_has_ipc) {
       // Extract 8KB IPC block
-      for (int j = 0; j < kIpcBufSize; ++j) {
-        ipcblock[j] = DoControl(KUTRACE_CMD_GETIPCWORD, k2++);
+      if (use_4kb) {
+        for (int j = 0; j < kIpcBufSize; j += k4KBSize) {
+          DoControl(KUTRACE_CMD_SET4KB, k2);
+          DoControl(KUTRACE_CMD_GETIPC4KB, (u64)(&ipcblock[j]));
+          k2 += k4KBSize;
+        }
+      } else {
+        for (int j = 0; j < kIpcBufSize; ++j) {
+          ipcblock[j] = DoControl(KUTRACE_CMD_GETIPCWORD, k2++);
+        }
       }
+
       fwrite(ipcblock, 1, sizeof(ipcblock), f);
     }
   }

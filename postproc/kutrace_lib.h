@@ -1,5 +1,5 @@
 // kutrace_lib.h 
-// Copyright 2022 Richard L. Sites
+// Copyright 2023 Richard L. Sites
 //
 // This is a simple interface for user-mode code to control kernel/user tracing and 
 // to add markers
@@ -38,6 +38,11 @@ typedef struct {
 #define KUTRACE_CMD_GETIPCWORD 9
 #define KUTRACE_CMD_TEST 10
 #define KUTRACE_CMD_VERSION 11
+// Added 2023.02.13
+#define KUTRACE_CMD_SET4KB 12
+#define KUTRACE_CMD_GET4KB 13
+#define KUTRACE_CMD_GETIPC4KB 14
+
 
 
 
@@ -137,9 +142,9 @@ typedef struct {
   
 #define KUTRACE_MBIT_SEC        0x218 	/* Network rate in Mb/s */
 
-#define KUTRACE_RESOURCE	0x219  /* Arbitrary resource span; arg says which resource */
-#define KUTRACE_ENQUEUE		0x21A  /* Put RPC on a work queue; arg says which queue */
-#define KUTRACE_DEQUEUE		0x21B  /* Remove RPC from a queue; arg says which queue */
+#define KUTRACE_RESOURCE	    0x219  /* Arbitrary resource span; arg says which resource */
+#define KUTRACE_ENQUEUE	 	    0x21A  /* Put RPC on a work queue; arg says which queue */
+#define KUTRACE_DEQUEUE	 	    0x21B  /* Remove RPC from a queue; arg says which queue */
 #define KUTRACE_PSTATE2         0x21C  /* P-states: cpu freq change, new in MHz increments */
 // Added 2022.05.24
 #define KUTRACE_TSDELTA         0x21D  /* Delta to advance timestamp */
@@ -154,8 +159,8 @@ typedef struct {
 #define KUTRACE_PC_K            0x281	/* added 2020.02.01 */
 
 // Lock held
-#define KUTRACE_LOCK_HELD	0x282	/* Inserted by eventtospan 2020.09.27 */
-#define KUTRACE_LOCK_TRY	0x283	/* Inserted by eventtospan 2020.09.27 */
+#define KUTRACE_LOCK_HELD	    0x282	/* Inserted by eventtospan 2020.09.27 */
+#define KUTRACE_LOCK_TRY	    0x283	/* Inserted by eventtospan 2020.09.27 */
 
 
 /* Reasons for waiting, inserted only in postprocessing */
@@ -180,26 +185,19 @@ typedef struct {
 /*  -4 callout, bubble to label some event */
 /*  -5 ... */
 
-//
-// These numbers must exactly match the numbers in kernel include file kutrace.h
-//
+/* Specific trap number for device not available */
+#define KUTRACE_DNA            7
+/* Specific trap number for page fault */
+#define KUTRACE_PAGEFAULT      14
 
-/* Specific syscall numbers */
-/* Take over last syscall32 number for tracing the scheduler call/return */
-#define KUTRACE_SCHEDSYSCALL (KUTRACE_SYSCALL32 + 511)	/* Top syscall32: 511 */
-	
-/* Specific trap numbers */
-#define KUTRACE_DNA		7	/* Device (8087) not available */
-#define KUTRACE_PAGEFAULT	14
+/* Specific IRQ numbers. Originally from arch/x86/include/asm/irq_vectors.h */
+#define KUTRACE_LOCAL_TIMER_VECTOR     0xec
 
-/* Specific IRQ numbers. Picked from arch/x86/include/asm/irq_vectors.h */
-#define KUTRACE_LOCAL_TIMER_VECTOR	0xec
+/* Reuse the spurious_apic vector to show bottom halves executing */
+#define KUTRACE_BOTTOM_HALF    255
+#define AST_SOFTIRQ		    	15
 
-/* Reuse the spurious_apic vector to show bottom halves (AST) executing */
-#define KUTRACE_BOTTOM_HALF	255
-#define AST_SOFTIRQ		15
-
-////#define RESCHEDULE_VECTOR      IPI_PREEMPT
+#define RESCHEDULE_VECTOR      IPI_PREEMPT
 
 
 // Names for events 000-00F could be added when one of these code points is
@@ -210,7 +208,7 @@ static const char* const kNameName[32] = {
   "-000-", "file", "pid", "rpc", 
   "trap", "irq", "trap", "irq",
   "syscall", "syscall", "syscall", "syscall",
-  "syscall32", "syscall32", "errno", "syscall32",
+  "syscall32", "syscall32", "syscall32", "syscall32",
 
   "packet", "pctmp", "kernv", "cpum",
   "host", "", "", "",
@@ -235,46 +233,6 @@ static const char* const kSpecialName[32] = {
 
 // Names for events 400-FFF are always embedded in the trace
 
-#if defined(__FreeBSD__)
-// Common ERRNO names for FreeBSD
-// If errno is in [-128..-1], subscript this by -errno - 1. 
-// Error -1 EPERM thus maps to kErrnoName[0], not [1]
-// Scraped from errno.h on 2022-07-03
-// Plus $ cat tmp_errno.txt |sed 's/}.*$/, /' |sed 's/^[^,]*, //' >tmp_errno_sm.txt
-// And some hand-edits for <CR>
-static const char* const kErrnoName[128] = {
- "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO", "E2BIG", "ENOEXEC", 
- "EBADF", "ECHILD", "EDEADLK", "ENOMEM", "EACCES", "EFAULT", "ENOTBLK", "EBUSY", 
- "EEXIST", "EXDEV", "ENODEV", "ENOTDIR", "EISDIR", "EINVAL", "ENFILE", "EMFILE", 
- "ENOTTY", "ETXTBSY", "EFBIG", "ENOSPC", "ESPIPE", "EROFS", "EMLINK", "EPIPE", 
-
- "EDOM", "ERANGE", "EAGAIN", "EINPROGRESS", 
- "EALREADY", "ENOTSOCK", "EDESTADDRREQ", "EMSGSIZE", 
- "EPROTOTYPE", "ENOPROTOOPT", "EPROTONOSUPPORT", "ESOCKTNOSUPPORT", 
- "EOPNOTSUPP", "EPFNOSUPPORT", "EAFNOSUPPORT", "EADDRINUSE", 
- "EADDRNOTAVAIL", "ENETDOWN", "ENETUNREACH", "ENETRESET", 
- "ECONNABORTED", "ECONNRESET", "ENOBUFS", "EISCONN", 
- "ENOTCONN", "ESHUTDOWN", "ETOOMANYREFS", "ETIMEDOUT", 
- "ECONNREFUSED", "ELOOP", "ENAMETOOLONG", "EHOSTDOWN", 
-
- "EHOSTUNREACH", "ENOTEMPTY", "EPROCLIM", "EUSERS", 
- "EDQUOT", "ESTALE", "EREMOTE", "EBADRPC", 
- "ERPCMISMATCH", "EPROGUNAVAIL", "EPROGMISMATCH", "EPROCUNAVAIL", 
- "ENOLCK", "ENOSYS", "EFTYPE", "EAUTH", 
- "ENEEDAUTH", "EIDRM", "ENOMSG", "EOVERFLOW", 
- "ECANCELED", "EILSEQ", "ENOATTR", "EDOOFUS", 
- "EBADMSG", "EMULTIHOP", "ENOLINK", "EPROTO", 
- "ENOTCAPABLE", "ECAPMODE", "ENOTRECOVERABLE", "EOWNERDEAD", 
-
- "EINTEGRITY", "", "", "", "", "", "", "", 
-  "", "", "", "", "", "", "", "", 
-  "", "", "", "", "", "", "", "", 
-  "", "", "", "", "", "", "", "", 
-};
-
-#else
-
-// Common ERRNO names for Linux
 // x86- and ARM-specific Names for return codes -128 to -1
 // If errno is in [-128..-1], subscript this by -errno - 1. 
 // Error -1 EPERM thus maps to kErrnoName[0], not [1]
@@ -303,7 +261,6 @@ static const char* const kErrnoName[128] = {
   "", "", "", "", "", "", "", "", 
 };
 
-#endif
 
 namespace kutrace {
   bool test();
