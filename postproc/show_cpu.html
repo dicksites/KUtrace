@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <html>
 <meta charset="UTF-8">
-<!-- Copyright 2022 Richard L. Sites -->
+<!-- Copyright 2023 Richard L. Sites -->
+<!-- Add dotted overlay -->
  
 <head>
  
@@ -378,7 +379,7 @@
 //----------------------------------------------------------------------------//
 
 // Version control for this file
-var script_edit_date = "(ver2023-03-11)";  // Shown in secondary menu for identification
+var script_edit_date = "(ver2023-05-16)";  // Shown in secondary menu for identification
 
 var book = false;		// Set true to get defaults for creating book diagrams
 
@@ -423,6 +424,7 @@ const kDummyData = {
               [999.0, 0, 0, 0, 0, 0, 0, 0, 0, "x"]]
 };
 
+const dotsbase =    -6;
 const annotbase =   -5;
 const calloutbase = -4;
 const arcbase =     -3;
@@ -741,6 +743,7 @@ const basetime0_value_max = 1;		// 0: normal, 1: relative to row start, /* 2: su
 const compress_value_max = 2;		// 0: none, 1: coloronly, 2: all
 const minmax_units_max = 2;		// 0: nsec, 1: usec, 2: msec
 const annottype_max = 1;		// 0: normal, 1: notched line
+const hack_value_max = 1;		// For random trials. Toggled by CB button shift-click
 
 // Secondary menu
 const legend_max = 2;			// 0: off, 1: vertical, 2: horizontal
@@ -1139,6 +1142,7 @@ var state2 = {
   usec_lo_time: 0,		// Actually nsec/usec/msec now
   usec_hi_time: 0,		//  see state2.minmax_units_value 
   basetime0_value: 0,
+  hack_value: 0,		// For random trials
 
   // Last single item annotated, even across pan/zoom
   annotated_one_d: -1,		// subscript of nearest previously-annotated highlited item
@@ -1383,6 +1387,7 @@ console.log("initializeState");
   state2.ovhd_value = 1;
   if (state2.lock_value != -1) {state2.lock_value = 2;}
   state2.cb_value = 0;
+  state2.hack_value = 0;
   aspecth = 0;
   aspectv = 0;
   state2.samp_value = 0;
@@ -1569,6 +1574,7 @@ function is_oval(d) {return ev(d) == -2;}
 function is_arc(d) {return ev(d) == -3;}
 function is_callout(d) {return ev(d) == -4;}
 function is_annot(d) {return ev(d) == annotbase;}
+function is_dots(d) {return ev(d) == dotsbase;}
 function is_overlay(d) {return (ev(d) < 0) && !is_arc(d);}
 function is_any_overlay(d) {return (ev(d) < 0);}
 
@@ -2321,6 +2327,73 @@ function draw_oval(d, left_t, right_t) {
       .attr("fill-opacity", 0.8);
 }
 
+// Draw diagonal orange overlay
+function draw_diag_orange (x0, x1) {
+  // One track is region234height / ydomainwidth pixels
+  // One row is  ypixpertrack * maxTrackHeight pixels 
+  var rows = (ybot_row + 1) - ytop_row;
+  var pxperrow =  region234height / rows;
+  // 1/4 of a row margin on top and bottom of diagonal lines
+  var orangemargin = Rnd0((pxperrow * 0.25));
+  var xleft = Rnd0(x0);
+  var ytop = orangemargin;
+  var ybottom = region234height - orangemargin;
+  var rect_width = Rnd0(x1 - x0);
+  var rect_height = Rnd0(region234height - (2 * orangemargin));
+  var tilt_xpx = Rnd0(region234height * 0.07);	// About a 4 degree slant. sin(4) = 0.0698
+
+  var rectpath = "M" + 0 + "," + orangemargin + " h" + rect_width + " v" + rect_height + " h" + (-rect_width) + " Z";
+
+  // Make a clipping rectangle sub-group
+  var innersvgdotgsvg = innersvgdotg.append("svg")
+      .attr("class", "graphlinex") 
+      .attr("x", xleft)
+      .attr("y", ytop)
+      .attr("width", rect_width)
+      .attr("height", rect_height);
+
+  innersvgdotgsvgdotg = innersvgdotgsvg.append("g");
+
+  // Light orange fill, semi-transparent
+  //innersvgdotgsvgdotg.append("path")
+  //    .attr("class", "graphlinex") 
+  //    .attr("d",  rectpath)   
+  //    .attr("fill", "#FFEEDD")
+  //    .attr("fill-opacity", 0.5); 
+
+  // Light orange border to give some definition, semi-transparent
+  innersvgdotgsvgdotg.append("path")
+      .attr("class", "graphlinex") 
+      .attr("d",  rectpath)   
+      .attr("fill", "none")
+      .attr("stroke-width", 6)		// Half is clipped off
+      .attr("stroke", "#FFEEDD")
+      .attr("stroke-opacity", 0.5); 
+
+  // Multiple diagonal organge lines
+  for (var j = xleft - tilt_xpx; j < x1; j+=11) {
+    var path = "M" + (j - xleft) + "," + (ybottom) + " l" + tilt_xpx + "," + (-rect_height);
+    innersvgdotgsvgdotg.append("path")
+      .attr("class", "graphlinex")
+      .attr("d",  path)
+      .attr("fill", "none")
+      .attr("stroke", "#FF8000")
+      .attr("stroke-width", 2);
+  }
+}
+
+// Draw diagonal orange lines spaced 11px. 
+// For hack showing some area of interest
+function draw_dots(d, left_t, right_t) {
+  if (state2.hack_value == 0) {return;}
+
+  var x0 = x_zoomed(ts(d));
+  var x1 = x_zoomed(tsend(d));
+  if (cpu(d) == 0) {
+    draw_diag_orange(x0, x1);
+  }
+}
+
 // Rotate <x,y> w.r.t. <0.0>
 function xyrotate(xypair, sincospair) {
   var xyresult = {x:0, y:0};
@@ -2337,12 +2410,13 @@ function draw_arc(d, x0, y0, x1, y1) {
   var right_x = x1;
 
   // Suppress arcs that are a small fraction of the display window
-  //  if the window width is greater than 5 milliseconds
-  //  if bold, show all arcs
+  //  suppress if the window width is greater than 5 milliseconds
+  //  but if bold, show all arcs
+  //  or if hack is set, show all arcs
   var bold = (state2.arcs_value == 1);
   var short_span = ((right_x - left_x) < (region3width * arcfraction));
   var long_window = (xdomainwidth > 0.005);
-  if (short_span && long_window && !force_annot && !bold) {return;}
+  if (short_span && long_window && !force_annot && !bold && (state2.hack_value == 0)) {return;}
 
   var left_y = y0;
   var right_y = y1;
@@ -2524,6 +2598,8 @@ function overlaydraw(d, gray) {
     draw_bracket(d, left_t, right_t);
   } else if (is_oval(d)) {
     draw_oval(d, left_t, right_t);
+  } else if (is_dots(d)) {
+    draw_dots(d, left_t, right_t);
   } else if (is_callout(d)) {
     draw_callout(d, left_t, right_t);
   } else if(!gray && is_arc(d)) {
@@ -3065,6 +3141,7 @@ function draw_idle(d, x0, y0, x1, gray, e_height) {
     }
 }
 
+
 // More to do in refactoring...
 // This does all the actual drawing from pixel values within innersvgdotg.
 // All the tracks and decisions and combining have been factored out.
@@ -3093,6 +3170,11 @@ function slowDrawOnRow(row, d, gray) {
     // Too small to see well -- draw as single line
     fastDrawOnRow(row, d, gray);
     return;
+  }
+
+// Hack: if hack is on and we are drawing local_timer, make it at least 5 pixels wide
+  if ((state2.hack_value != 0) && (ev(d) == 1516)) {
+    x1 = Math.max(x1, x0 + 5);
   }
 
   var path = "M" + Rnd1(x0) + "," + Rnd1(y0) + " H" + Rnd1(x1);
@@ -3326,6 +3408,15 @@ function draw_on_row(row, d, gray) {
   // Always draw RPC lines and raw packets
   if (is_rpcpkt(d)) {can_defer = false;}
   if (is_pkt(d)) {can_defer = false;}
+  if (is_dots(d)) {
+    can_defer = false;
+  }
+
+// Hack: if hack is on and we are drawing local_timer, make it at least 5 pixels wide
+  if ((state2.hack_value != 0) && (ev(d) == 1516)) {
+    can_defer = false;
+  }
+
 
   // Important performance optimization with 1M events 
   if (can_defer && ((defer_dur[row] + dur(d)) < xsecperpix)) {
@@ -4046,7 +4137,8 @@ function annotatesearch2(needle, mindur, maxdur) {
   resetlines();
   document.getElementById("matchcount").innerHTML = "";
 
-  if (needle.search(/^(\d\d?:)?\d\d?\.[0-9]+(\+|\-)*$/) >= 0) {
+  // xx:xx.xxx+- or xxx.xxx+-
+  if (needle.search(/^(\d\d?:)?\d\d?\d?\.[0-9]+(\+|\-)*$/) >= 0) {
     SeekTime(needle); 
     return;
   }
@@ -6329,7 +6421,14 @@ function doToggleLock(e) {
   redrawEvents();
 }
 
+// If shift-click, toggle hack_value instead
 function doToggleCb(e) {
+  if (e.shiftKey) {
+    state2.hack_value = doToggle(e.shiftKey, state2.hack_value, hack_value_max);
+    redrawUI();
+    redrawEvents();
+    return;
+  }
   state2.cb_value = doToggle(e.shiftKey, state2.cb_value, cb_value_max);
   currentcolor = (state2.cb_value == 0) ? normalcolor : colorblindcolor;
   redrawUI();
