@@ -1,19 +1,26 @@
 // Little program to dump KUtrace raw trace files in hex
 // dsites 2022.05.27
 //
-// Usage: kuod filename
+// Usage: kuod filename <-all> <-t>
 //
+
+// dsites 2023.04.14 add showing local datetime for each raw block header
+
+// compile with g++ -O2 kuod.cc -o kuod
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "kutrace_lib.h"
 
 typedef unsigned char uint8;
 typedef unsigned long long int uint64;
 
+bool printall = false;
+
 void usage(void) {
-  fprintf(stderr, "Usage: kuod <tracefile.trace\n");
+  fprintf(stderr, "Usage: kuod <tracefile.trace> <-all>\n");
   exit(0);
 }
 
@@ -52,6 +59,16 @@ bool IsHeaderWord(bool has_ipc, int block_8k, int wordnum) {
   return false;
 }
 
+// Return true if this 8KB is the beginning of a 64KB/72KB trace block
+bool IsBlockHeader(bool has_ipc, int block_8k) {
+  if (has_ipc) {
+    if ((block_8k % 9) == 0) {return true;}
+  } else {
+    if ((block_8k % 8) == 0) {return true;}
+  }
+  return false;
+}
+
 bool IsIpcWord(bool has_ipc, int block_8k, int wordnum) {
   // If IPC, the values are in every 9th 8K block
   if (!has_ipc) {return false;}
@@ -71,6 +88,9 @@ int main(int argc, const char** argv) {
     }
     fprintf(stdout, "%s\n\n", argv[1]);
   }
+  
+  // If any extra parameter, treat as print all lines of zero
+  if (3 <= argc) {printall = true;}
     
   int n;
   uint64 buffer[1024];	// read 8KB at a time
@@ -85,12 +105,25 @@ int main(int argc, const char** argv) {
     if (block_8k == 0) {
       has_ipc = (((buffer[1] >> 56) & 0x80) != 0);  // High flag bit is IPC bit
     }
+
+    // Show datetime for each block header
+    if (IsBlockHeader(has_ipc, block_8k)) {
+      uint64 block_start_usec = buffer[1] & 0x00FFFFFFFFFFFFFFLL; 
+      time_t block_start_sec = block_start_usec / 1000000;
+      char* block_start_ctime = ctime(&block_start_sec);
+      // String extraneous trailing \n and also strip date
+      block_start_ctime[strlen(block_start_ctime) - 6] = '\0';
+      fprintf(stdout, "\n%s.%06llu block[%04d]\n",
+        block_start_ctime, block_start_usec % 1000000, block_8k / (8 + has_ipc));
+    }
+
     // Do four words per line (32 bytes)
     for (int i = 0; i < lenu64; i += 4) {
       offset += 32;
       
       // Skip lines of zeros
-      if ((buffer[i + 0] == 0) && (buffer[i + 1] == 0) && 
+      if (!printall &&
+          (buffer[i + 0] == 0) && (buffer[i + 1] == 0) && 
           (buffer[i + 2] == 0) && (buffer[i + 3] == 0)) {
         if (!skipping) {fprintf(stdout, "  ...\n\n");}
         skipping = true;
