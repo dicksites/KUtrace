@@ -13,6 +13,8 @@
 // dsites 2022.05.23 Add FreeBSD tweaks
 // dsites 2022.08.19 Add RISC-V tweaks
 // dsites 2022.08.19 Add RPi tweaks
+// dsites 2023.04.30 Update TSDELTA processing to go backward
+// dsites 2023.05.03 Update timestamp processing to go backward in top 7/8 of wrap period
 //
 
 
@@ -72,6 +74,10 @@ static const uint64 kLargeTsdelta = 2000000000;
 
 // For dealing with riscv poor-resolution sifive u74-mc clock (1MHz)
 bool is_low_res_ts = false;		// True for Riscv u74 1 MHz timestamp
+
+
+// For deciding that large timestamp advance is really a late store with backward time.
+static const uint64 kLateStoreThresh = 0x0000000000020000LLU;
 
 // Version 3 all values are pre-shifted
 
@@ -290,6 +296,11 @@ const char* FormatUsecDateTime(int64 us) {
 inline bool Wrapped(uint64 prior, uint64 now) {
   if (prior <= now) {return false;}	// Common case 
   return (prior > (now + 4096));	// Wrapped if prior is larger
+}
+
+inline bool LateStore(uint64 prior, uint64 now) {
+  if (prior <= now) {return false;}		// Common case 
+  return (prior <= (now + kLateStoreThresh));	// Late store 
 }
  
 // A user-mode-execution event is the pid number plus 64K
@@ -698,7 +709,7 @@ bool handle_very_first_block (uint64* traceblock, uint64* base_usec_timestamp, C
 }
 
 //
-// Usage: rawtoevent <trace file name>
+// Usage: rawtoevent <trace file name> [-v] [-h] [-maxblock n]
 //
 int main (int argc, const char** argv) {
   // Some statistics
@@ -714,6 +725,7 @@ int main (int argc, const char** argv) {
   uint64 events_by_type[16];		// From high nibble of eventnum
   memset(events_by_type, 0, 16 * sizeof(uint64));
 
+  int maxblock = 999999999;
   uint64 current_cpu = 0;
   uint64 traceblock[kTraceBufSize];	// 8 bytes per trace entry
   uint8 ipcblock[kTraceBufSize];	// One byte per trace entry
@@ -735,6 +747,16 @@ int main (int argc, const char** argv) {
   // Context switch events are 0x10000 + pid
   // Initialize idle process name, pid 0
   names[0x10000] = string(kIdleName);
+
+  // Pick up flags
+  for (int i = 1; i < argc; ++i) {
+    if (strcmp(argv[i], "-v") == 0) {verbose = true;}
+    if (strcmp(argv[i], "-h") == 0) {hexevent = true;}
+    if ((strcmp(argv[i], "-maxblock") == 0) && (i < (argc - 1))) {
+      ++i;
+      maxblock = atoi(argv[i]);
+    }
+  }
   
   for (int i = 0; i < kMAX_CPUS; ++i) {
     current_pid[i] = 0; 
@@ -755,12 +777,6 @@ int main (int argc, const char** argv) {
     }
   }
 
-  // Pick up flags
-  for (int i = 1; i < argc; ++i) {
-    if (strcmp(argv[i], "-v") == 0) {verbose = true;}
-    if (strcmp(argv[i], "-h") == 0) {hexevent = true;}
-  }
-
   int blocknumber = 0;
   uint64 base_minute_usec, base_minute_cycle, base_minute_shift;
 
@@ -774,6 +790,8 @@ int main (int argc, const char** argv) {
   // Outer loop over blocks                                                   //
   //--------------------------------------------------------------------------//
   while (fread(traceblock, 1, sizeof(traceblock), f) != 0) {
+    if (blocknumber >= maxblock) {break;}
+
     // Need first [1] line to get basetime in later steps
     // TODO: Move this to a stylized BASETIME comment
     ////fprintf(stdout, "# blocknumber %d\n", blocknumber);
@@ -1051,6 +1069,27 @@ int main (int argc, const char** argv) {
       // prior + delta_lo = ppq.d6ff6 but (ppq.d6ff6 - ppp.f8938 fits in 20 bits, so would not have generated a tsdelta
       // prior + delta = ppr.d6ff6
  
+
+/*
+ * In recording a trace event, it is possible for an interrupt to happen after 
+ * KUtrace code takes the event timestamp and before it claims the storage location.
+ * In this case, the interupt handling will recursively record several events 
+ * before returning to the original KUtrace path, which then claims a location
+ * and stores the original event with its earlier timestamp. This is called a
+ * "late store." When that happens, the reconstruciton in rawtoevent needs to
+ * decide whether time went forward by almost the entire 20-bit wraparound
+ * period, or went backward by some amount.
+ * 
+ * To resolve this ambiguity, we declare that a time gap of 7/8 of the wraparound
+ * period is forward time and the high 1/8 is backward time associated with an
+ * otherwise undetectable backward time.
+ * 
+ * To mark forward time in that 1/8 (and above), we add a TSDELTA entry to the
+ * trace. The exact compare for late store must be identical in kutrace_mod.c 
+ * and in rawtoevent.cc.
+ * 
+ */
+
       // If TSDELTA entry, increment the prepend value.
       // argall has the time difference between this entry and previous one,
       // in units of timestamp ticks (10-20nsec).
@@ -1066,15 +1105,25 @@ int main (int argc, const char** argv) {
           prepend = newfull & ~0xfffffLLU;
           t =       newfull &  0xfffffLLU;
           prior_t = t;
- 
-          //// Increment prepend, but just by the part above 20 bits
-          ////prepend += (argall & ~0xFFFFFLLU);
-          }
-        continue;
+        } else {
+          // Negative TSDELTA. Do unsigned subtraction.
+          uint64 oldfull = (prepend | prior_t);	// Old prepend old t
+          uint64 newfull = oldfull + (0xFFFFFFFF00000000LLU | argall); // sign extend arg
+
+          // Use newfull, but do not update prepend. Doing so would ... 
+          prepend = newfull & ~0xfffffLLU;
+          t =       newfull &  0xfffffLLU;
+          prior_t = t;
+        }
+        continue;	// Skip everything else about the TSDELTA event
+
       } else {
-        // Increment the prepend if truncated time rolls over
-        if (Wrapped(prior_t, t)) {prepend += 0x100000;}
+        // Increment the prepend if truncated time rolls over and not caused by a late store
+        if (Wrapped(prior_t, t) && !LateStore(prior_t, t)) {
+          prepend += 0x100000;
+        }
       }
+
       
       // tfull is increments of cycles from the base minute for this trace
       uint64 tfull = prepend | t;

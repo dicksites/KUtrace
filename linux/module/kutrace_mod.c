@@ -344,6 +344,10 @@ DECLARE_PER_CPU(struct kutrace_traceblock, kutrace_traceblock_per_cpu);
 #define GETTIMEOFDAY_MASK   CLU(0x00ffffffffffffff)
 #define FLAGS_SHIFT 56
 
+/* For deciding that large timestamp advance is really a late store */
+/* with backward time. */
+static const u64 kLateStoreThresh = 0x00000000000e0000LLU;
+
 
 /*
  * Trace memory is consumed backward, high to low
@@ -620,6 +624,10 @@ inline u64 ku_get_cpu_freq(void) {
 #endif
 }
 
+/* Return true for large time advance that should be treated as small backward time */
+inline bool LateStoreOrLarge(u64 delta_cycles) {
+  return delta_cycles > kLateStoreThresh;
+}
 
 
 /* Make sure name length fits in 1..8 u64's */
@@ -1091,6 +1099,25 @@ static u64 *get_claim(int len, struct kutrace_traceblock* tb)
 }
 
 
+/*
+ * In recording a trace event, it is possible for an interrupt to happen after 
+ * KUtrace code takes the event timestamp and before it claims the storage location.
+ * In this case, the interupt handling will recursively record several events 
+ * before returning to the original KUtrace path, which then claims a location
+ * and stores the original event with its earlier timestamp. This is called a
+ * "late store." When that happens, the reconstruciton in rawtoevent needs to
+ * decide whether time went forward by almost the entire 20-bit wraparound
+ * period, or went backward by some amount.
+ * 
+ * To resolve this ambiguity, we declare that a time gap of 7/8 of the wraparound
+ * period is forward time and the high 1/8 is backward time associated with an
+ * otherwise undetectable backward time.
+ * 
+ * To mark forward time in that 1/8 (and above), we add a TSDELTA entry to the
+ * trace. The exact compare for late store must be identical in kutrace_mod.c 
+ * and in rawtoevent.cc.
+ * 
+ */
 
 /* Get a claim. If delta_cycles is large, claim one more word and insert TSDELTA entry */
 /* NOTE: tsdelta is bogus for very first entry per CPU. */
@@ -1099,14 +1126,15 @@ static u64 *get_claim(int len, struct kutrace_traceblock* tb)
 inline u64* get_claim_with_tsdelta(u64 now, u64 delta_cycles,  
                                    int len, struct kutrace_traceblock* tb) {
 	u64 *claim;
-	/* Check if time between events wraps above the 20-bit timestamp */
-	if (((delta_cycles & ~UNSHIFTED_TIMESTAMP_MASK) != 0) && (tb->prior_cycles != 0)) {
+	/* Check if time between events almost wraps above the 20-bit timestamp */
+	if (LateStoreOrLarge(delta_cycles) && (tb->prior_cycles != 0)) {
 		/* Uncommon case. Add timestamp delta entry before original entry */
 		claim = get_claim(1 + len, tb);
 		if (claim != NULL) {
 			claim[0] = (now << TIMESTAMP_SHIFT) | 
-			           ((u64)KUTRACE_TSDELTA << EVENT_SHIFT) | (delta_cycles & ARG_MASK);
-			++claim;				/* Start of space for original entry */
+			           ((u64)KUTRACE_TSDELTA << EVENT_SHIFT) | 
+                                   (delta_cycles & ARG_MASK);
+			++claim;		/* Start of space for original entry */
 		}
 	} else {
 		/* Common case */
