@@ -64,6 +64,7 @@
 // 2021.10.22 dsites Change mwait to wfi for Raspberry Pi
 // 2022.06.05 dsites Allow mwait(0) for C1 state, add mwait exit event
 // 2022.06.05 dsites Get pid (later: rpc names to track over time if they change
+// 2023.07.24 dsites Make default syscall dff, not 9ff
 
 // Compile with  g++ -O2 eventtospan3.cc -o eventtospan3
 
@@ -98,14 +99,17 @@
 // Point events 200..3ff
 #define dummy_trap       0x4ff
 #define dummy_irq        0x5ff
-#define dummy_syscall    0x9ff
+#define dummy_syscall    0xdff
+#define dummy_syscall_old    0x9ff
 #define largest_non_pid  0xfff
 #define pid_idle         0
 #define event_idle       (0x10000 + pid_idle)
 #define event_c_exit     0x20000
 
-#define sched_syscall    0x9ff
-#define sched_sysret     0xbff
+#define sched_syscall    0xdff
+#define sched_sysret     0xfff
+#define sched_syscall_old    0x9ff
+#define sched_sysret_old     0xbff
 
 #define ipc_mask         0x0f
 
@@ -585,12 +589,15 @@ bool OnlyInKernelMode(const OneSpan& event) {
   if (event.eventnum == KUTRACE_PC_U) {return true;}	// user-mode PC sample in timer irq 2020.11.06
   if (event.eventnum == sched_syscall) {return true;}	// only kernel can call the scheduler
   if (event.eventnum == sched_sysret) {return true;}	// only kernel can return from the scheduler
+  if (event.eventnum == sched_syscall_old) {return true;}	// only kernel can call the scheduler
+  if (event.eventnum == sched_sysret_old) {return true;}	// only kernel can return from the scheduler
   return false;
 }
 
 // True if the event means we must be executing in user mode
 bool OnlyInUserMode(const OneSpan& event) {
-  if (event.eventnum == sched_syscall) {return false;}	// only kernel call the scheduler
+  if (event.eventnum == sched_syscall) {return false;}		// only kernel call the scheduler
+  if (event.eventnum == sched_syscall_old) {return false;}	// only kernel call the scheduler
   if ((event.eventnum & 0xE00) == KUTRACE_SYSCALL64) {return true;}	// Calls 8xx, 9xx
   if ((event.eventnum & 0xE00) == KUTRACE_SYSCALL32) {return true;}	// Calls Cxx, Dxx
   if (event.eventnum == KUTRACE_MWAIT) {return true;}	// mwait (in idle loop); so not inside call/irq/fault
@@ -776,17 +783,17 @@ bool IsNewRunnablePidSyscall(const OneSpan& event) {
 
 // (3)
 bool IsSchedCallEvent(const OneSpan& event) {
-  return (event.eventnum == sched_syscall);
+  return ((event.eventnum == sched_syscall) || (event.eventnum == sched_syscall_old));
 }
 bool IsSchedCallEventnum(int eventnum) {
-  return (eventnum == sched_syscall);
+  return ((eventnum == sched_syscall) || (eventnum == sched_syscall_old));
 }
 
 bool IsSchedReturnEvent(const OneSpan& event) {
-  return (event.eventnum == sched_sysret);
+  return ((event.eventnum == sched_sysret) || (event.eventnum == sched_sysret_old));
 }
 bool IsSchedReturnEventnum(int eventnum) {
-  return (eventnum == sched_sysret);
+  return ((eventnum == sched_sysret) || (eventnum == sched_sysret_old));
 }
 
 
@@ -1327,6 +1334,7 @@ void FinalJson(FILE* f) {
 int NestLevel(int eventnum) {
   if (largest_non_pid < eventnum) {return 0;}			// User-mode pid
   if (eventnum == sched_syscall) {return 4;}			// Enter the scheduler
+  if (eventnum == sched_syscall_old) {return 4;}		// Enter the scheduler
 								// must precede syscall below
   if ((eventnum & call_ret_mask) == KUTRACE_SYSCALL64) {return 1;}	// syscall/ret
   if ((eventnum & call_ret_mask) == KUTRACE_SYSCALL32) {return 1;}	// syscall/ret
@@ -1404,7 +1412,7 @@ void WaitBeforeWakeup(const OneSpan& event, CPUState* cpustate, PerPidState* per
   // waiting time; the current wakeup event signals the end of that waiting.
   // The top of the per-CPU call stack says what kernel routine is doing the wakeup.
   // TRICKY: The target PID might actually be running or in the scheduler right now,
-  // about to be context switched out. Inthat case, avoid any before-wakeup event.
+  // about to be context switched out. In that case, avoid any before-wakeup event.
 
   // There is no priorPidEvent at the beginning of a trace.
   if (priorPidEvent.find(target_pid) == priorPidEvent.end()) {return;}
@@ -1428,10 +1436,16 @@ void WaitBeforeWakeup(const OneSpan& event, CPUState* cpustate, PerPidState* per
   } else if (stack->name[stack->top] == "page_fault") {	// memory
     letter = 'm';		// memory
   } else if (stack->name[stack->top] == "mmap") {
+//DumpEvent(stdout, "letter m1", event);
     letter = 'm';		// memory
   } else if (stack->name[stack->top] == "munmap") {
+//DumpEvent(stdout, "letter m2", event);
     letter = 'm';		// memory
   } else if (stack->name[stack->top] == "mprotect") {
+//DumpEvent(stdout, "letter m3", event);
+    letter = 'm';		// memory
+  } else if (stack->name[stack->top] == "madvise") {
+//DumpEvent(stdout, "letter m4", event);
     letter = 'm';		// memory
   } else if (stack->name[stack->top] == "futex") {	// lock
     letter = 'l';		// lock
@@ -1440,6 +1454,10 @@ void WaitBeforeWakeup(const OneSpan& event, CPUState* cpustate, PerPidState* per
   } else if (stack->name[stack->top] == "write") {
     letter = 'p';		// pipe
   } else if (stack->name[stack->top] == "sendto") {
+    letter = 'p';		// pipe
+  } else if (stack->name[stack->top] == "open") {
+    letter = 'p';		// pipe
+  } else if (stack->name[stack->top] == "openat") {
     letter = 'p';		// pipe
   } else if (stack->name[stack->top].substr(0,7) == "kworker") {
     letter = 'p';		// pipe
