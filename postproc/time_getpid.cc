@@ -54,7 +54,6 @@
 #include <sys/time.h>	// gettimeofday
 #include "basetypes.h"
 #include "kutrace_lib.h"
-////#include "timecounters.h"
 
 // On ARM-32 /usr/include/arm-linux-gnueabihf/asm/unistd-common.h
 // On ARM-64 linux/arch/arm64/include/asm/unistd32.h
@@ -66,6 +65,8 @@
 #define __NR_getpid 20
 #elif defined(__x86_64__)
 #define __NR_getpid 39
+#elif defined(__riscv)
+#define __NR_getpid 172
 #else
 BUILD_BUG_ON_MSG(1, "Define NR_getpid for your architecture");
 #endif
