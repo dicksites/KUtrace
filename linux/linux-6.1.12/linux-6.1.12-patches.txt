@@ -413,7 +413,7 @@ index 000000000000..8981cfde440b
 --- /dev/null
 +++ b/include/linux/kutrace.h
 @@ -0,0 +1,184 @@
-+// SPDX-License-Identifier: GPL-2.0-only
++// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * include/linux/kutrace.h
 + *
@@ -623,7 +623,7 @@ index 000000000000..de44e770e868
 --- /dev/null
 +++ b/kernel/kutrace/kutrace.c
 @@ -0,0 +1,41 @@
-+// SPDX-License-Identifier: GPL-2.0-only
++// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * kernel/kutrace/kutrace.c
 + *
