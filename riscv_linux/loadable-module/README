@@ -5,4 +5,4 @@ These need to include the exported KUtrace symbols from applying kernel patches.
 For those  not building patches form scratch on a Raspberry Pi4-B, the pre-
 compiled module for that fixed configuration is included here.
 
-All the code is open sourced under the BSD three-clause license.
+All the code is open sourced under GPL-2.0-or-later.
