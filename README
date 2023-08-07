@@ -41,8 +41,7 @@ these three versions or for incorporating the patches into other versions. Only
 64-bit versions of Linux are supported in this code; 32-bit ports of KUtrace 
 are possible but difficult.
 
-All the code is open sourced under the BSD three-clause license, except the 
-loadable module which is required by Linux to be licensed under GPL.
+All the code is open sourced, most of it under the BSD three-clause license. The code specific to freebsd uses the BSD2 license, and the code specific to risc-v is licensed under GPL-2.0. The Linux loadable module(s) are required by Linux to be licensed under GPL-2.0. 
 
 
 
