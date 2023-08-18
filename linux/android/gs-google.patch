@@ -1,0 +1,229 @@
+diff --git a/Makefile.ext_modules.slider b/Makefile.ext_modules.slider
+index aac2b74e38c2..b81f26030fa2 100644
+--- a/Makefile.ext_modules.slider
++++ b/Makefile.ext_modules.slider
+@@ -16,6 +16,7 @@ ext_modules += display/samsung
+ ext_modules += edgetpu/abrolhos/drivers/edgetpu
+ ext_modules += gpu/mali_kbase
+ ext_modules += gpu/mali_pixel
++ext_modules += kutrace
+ ext_modules += lwis
+ ext_modules += nfc
+ ext_modules += power/reset
+diff --git a/android/abi_gki_aarch64_generic b/android/abi_gki_aarch64_generic
+index 71807939e99e..79b1ff24a9c3 100644
+--- a/android/abi_gki_aarch64_generic
++++ b/android/abi_gki_aarch64_generic
+@@ -1261,6 +1261,11 @@
+   ktime_get_snapshot
+   ktime_get_ts64
+   ktime_get_with_offset
++  kutrace_global_ops
++  kutrace_net_filter
++  kutrace_pid_filter
++  kutrace_traceblock_per_cpu
++  kutrace_tracing
+   kvfree
+   kvfree_call_rcu
+   kvmalloc_node
+diff --git a/include/linux/kutrace.h b/include/linux/kutrace.h
+new file mode 100644
+index 000000000000..c65e23b3e9a2
+--- /dev/null
++++ b/include/linux/kutrace.h
+@@ -0,0 +1,195 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * include/linux/kutrace.h
++ *
++ * Author: Richard Sites <dick.sites@gmail.com>
++ * Signed-off-by: Richard Sites <dick.sites@gmail.com>
++ */
++
++#ifndef _LINUX_KUTRACE_H
++#define _LINUX_KUTRACE_H
++
++#include <linux/types.h>
++
++/* Take over last syscall number for controlling kutrace */
++#define __NR_kutrace_control 1023
++
++/* Take over last syscall number for tracing scheduler call/return */
++#define KUTRACE_SCHEDSYSCALL 1023
++
++/* kutrace_control() commands */
++#define KUTRACE_CMD_OFF 0
++#define KUTRACE_CMD_ON 1
++#define KUTRACE_CMD_FLUSH 2
++#define KUTRACE_CMD_RESET 3
++#define KUTRACE_CMD_STAT 4
++#define KUTRACE_CMD_GETCOUNT 5
++#define KUTRACE_CMD_GETWORD 6
++#define KUTRACE_CMD_INSERT1 7
++#define KUTRACE_CMD_INSERTN 8
++#define KUTRACE_CMD_GETIPCWORD 9
++#define KUTRACE_CMD_TEST 10
++#define KUTRACE_CMD_VERSION 11
++
++// This is able to pick up two ranges of interrupt numbers where we want to
++// sample the PC. The counts must be a power of 2. If you only want one range,
++// then you should set the IRQ1 and IRQ2 to be the same and COUNT1 and COUNT2
++// to be the same. If you want to edit this configuration for your own device,
++// then you should consult /proc/interrupts for 250 Hz timer interrupt. This
++// configuration is specific to the Pixel 6 Pro.
++#define KUTRACE_TIMER_IRQ1	11
++#define KUTRACE_TIMER_COUNT1	1
++#define KUTRACE_TIMER_IRQ2	292
++#define KUTRACE_TIMER_COUNT2	8
++
++
++/* This is a *shortened* list of kernel-mode raw trace 12-bit event numbers */
++/* See user-mode kutrace_lib.h for the full set */
++
++/* Entry to provide names for PIDs */
++#define KUTRACE_PIDNAME       0x002
++
++
++// Specials are point events
++#define KUTRACE_USERPID       0x200  /* Context switch: new PID */
++#define KUTRACE_RPCIDREQ      0x201
++#define KUTRACE_RPCIDRESP     0x202
++#define KUTRACE_RPCIDMID      0x203
++#define KUTRACE_RPCIDRXPKT    0x204
++#define KUTRACE_RPCIDTXPKT    0x205
++#define KUTRACE_RUNNABLE      0x206  /* Set process runnable: PID */
++#define KUTRACE_IPI           0x207  /* Send IPI; receive is an interrupt */
++#define KUTRACE_MWAIT         0x208  /* C-states */
++#define KUTRACE_PSTATE        0x209  /* P-states */
++#define KUTRACE_RX_PKT        0x214  /* Raw packet received w/payload hash */
++#define KUTRACE_TX_PKT        0x215  /* Raw packet sent w/payload hash */
++#define KUTRACE_PSTATE2       0x21C  /* P-states */
++#define KUTRACE_TSDELTA       0x21D  /* Delta to advance timestamp */
++
++
++/* Entry to provide a PC sample at timer interrupts (profiling) */
++#define KUTRACE_PC            0x280
++
++
++/* These are in blocks of 256 numbers */
++#define KUTRACE_TRAP      0x0400     /* AKA fault */
++#define KUTRACE_IRQ       0x0500
++#define KUTRACE_TRAPRET   0x0600
++#define KUTRACE_IRQRET    0x0700
++
++
++/* These are in blocks of 512 numbers */
++#define KUTRACE_SYSCALL64 0x0800
++#define KUTRACE_SYSRET64  0x0A00
++#define KUTRACE_SYSCALL32 0x0C00
++#define KUTRACE_SYSRET32  0x0E00
++
++/* Specific trap number for page fault */
++#define KUTRACE_PAGEFAULT  14
++#define KUTRACE_KPENDING  127
++#define KUTRACE_KFAULT  128
++
++/* Reuse the spurious_apic vector to show bottom halves exeuting */
++#define KUTRACE_BOTTOM_HALF	241
++#define KUTRACE_RESCHED_IPI	224
++
++/* Procedure interface to loadable module or compiled-in kutrace.c */
++struct kutrace_ops {
++	void (*kutrace_trace_1)(u64 num, u64 arg);
++	void (*kutrace_trace_2)(u64 num, u64 arg1, u64 arg2);
++	void (*kutrace_trace_many)(u64 num, u64 len, const char *arg);
++	u64 (*kutrace_trace_control)(u64 command, u64 arg);
++};
++
++/* Packet filter parameters */
++struct kutrace_nf {
++	u64 hash_init;
++	u64 hash_mask[3];
++};
++
++/* Per-cpu struct */
++struct kutrace_traceblock {
++	atomic64_t next;	/* Next u64 in current per-cpu trace block */
++	u64 *limit;		/* Off-the-end u64 in current per-cpu block */
++	u64 prior_cycles;	/* IPC tracking */
++	u64 prior_inst_retired;	/* IPC tracking */
++};
++
++
++#ifdef CONFIG_KUTRACE
++/* Global variables used by kutrace. Defined in kernel/kutrace/kutrace.c */
++extern bool kutrace_tracing;
++extern struct kutrace_ops kutrace_global_ops;
++extern u64 *kutrace_pid_filter;
++extern struct kutrace_nf kutrace_net_filter;
++
++/* Insert pid name if first time seen. Races don't matter here. */
++#define kutrace_pidname(next) \
++	if (kutrace_tracing) { \
++		pid_t pid16 = next->pid & 0xffff; \
++		pid_t pid_hi = pid16 >> 6; \
++		u64 pid_bit = 1ul << (pid16 & 0x3f); \
++		if ((kutrace_pid_filter[pid_hi] & pid_bit) == 0) { \
++			u64 name_entry[3]; \
++			name_entry[0] = pid16; \
++			memcpy(&name_entry[1], next->comm, 16); \
++			(*kutrace_global_ops.kutrace_trace_many)( \
++			 KUTRACE_PIDNAME, 3l, (const char*)&name_entry[0]); \
++			kutrace_pid_filter[pid_hi] |= pid_bit; \
++		} \
++	}
++
++/* Unconditionally insert or reset pid name. Races don't matter here. */
++#define kutrace_pidrename(next) \
++	if (kutrace_tracing) { \
++		pid_t pid16 = next->pid & 0xffff; \
++		pid_t pid_hi = pid16 >> 6; \
++		u64 pid_bit = 1ul << (pid16 & 0x3f); \
++		if (true) { \
++			u64 name_entry[3]; \
++			name_entry[0] = pid16; \
++			memcpy(&name_entry[1], next->comm, 16); \
++			(*kutrace_global_ops.kutrace_trace_many)( \
++			 KUTRACE_PIDNAME, 3l, (const char*)&name_entry[0]); \
++			kutrace_pid_filter[pid_hi] |= pid_bit; \
++		} \
++	}
++
++/* Filter packet payload and if passes insert 32-byte hash into trace */
++/* Mask first payload 24 bytes, XOR, and check for expected value */
++/* ku_payload may well not be 8-byte aligned, but only 4-byte */
++#define kutrace_pkttrace(rx_tx, ku_payload) \
++do { \
++	u64 hash = kutrace_net_filter.hash_init; \
++	hash ^= (ku_payload[0] & kutrace_net_filter.hash_mask[0]); \
++	hash ^= (ku_payload[1] & kutrace_net_filter.hash_mask[1]); \
++	hash ^= (ku_payload[2] & kutrace_net_filter.hash_mask[2]); \
++	hash ^= (hash >> 32); \
++	hash &= 0x00000000ffffffffLLU;	/* The filter hash */ \
++	if (hash == 0) { \
++		/* We passed the filter; now hash first 32 bytes and record */ \
++		hash = ku_payload[0] ^ ku_payload[1] ^ ku_payload[2] ^ ku_payload[3]; \
++		hash ^= (hash >> 32); \
++		hash &= 0x00000000ffffffffLLU; \
++		kutrace1(rx_tx, hash); \
++	} \
++} while(0);
++
++#define	kutrace1(event, arg) \
++	if (kutrace_tracing) { \
++		(*kutrace_global_ops.kutrace_trace_1)(event, arg); \
++	}
++
++/* map_nr moves 32-bit syscalls 0x200..3FF to 0x400..5FF */
++#define	kutrace_map_nr(nr) (nr + (nr & 0x200))
++
++#else
++
++#define	kutrace_pidname(next)
++#define	kutrace_pidrename(next)
++#define	kutrace1(event, arg)
++#define	kutrace_map_nr(nr) (nr)
++
++#endif /* CONFIG_KUTRACE */
++
++#endif /* _LINUX_KUTRACE_H */
