@@ -2,7 +2,7 @@
 // The main work is turning truncated cycle times into multiples of 10ns
 // Copyright 2021 Richard L. Sites
 //
-// Input has filename like 
+// Input has filename like
 //   kutrace_control_20170821_095154_dclab-1_2056.trace
 //
 // compile with g++ -O2 rawtoevent.cc from_base40.cc kutrace_lib.cc -o rawtoevent
@@ -40,7 +40,7 @@ static int gTIMER_IRQ_EVENT = 0x05ec;	// local_timer
 static int gSCHED_EVENT = 0x0dff;	// -sched-
 
 // Remap high syscall numbers into lo sys32 numbers
-#define	kutrace_map_nr(nr) (nr + (nr & 0x200)) 
+#define	kutrace_map_nr(nr) (nr + (nr & 0x200))
 
 /* Amount to shift cycle counter to get 20-bit timestamps */
 /* 4 bits = ~ 2.56 GHz/16 ~ 6nsec tick resolution */
@@ -64,13 +64,13 @@ static const bool TRACEWRAP = false;
 static const int kMAX_CPUS = 80;
 static const int mhz_32bit_counts = 54;
 static const int kNetworkMbPerSec = 1000;	// Default: 1 Gb/s
-static const int kDefaultLowResNsec10 = 35;	// Low-res riscv: 0 dur => 350 nsec instead 
+static const int kDefaultLowResNsec10 = 35;	// Low-res riscv: 0 dur => 350 nsec instead
 
 // For sanity checks
 static const uint64 usec_per_100_years = 1000000LL * 86400 * 365 * 100;  // Thru ~2070
 
 // Large ts difference means slightly backward time
-static const uint64 kLargeTsdelta = 2000000000;	
+static const uint64 kLargeTsdelta = 2000000000;
 
 // For dealing with riscv poor-resolution sifive u74-mc clock (1MHz)
 bool is_low_res_ts = false;		// True for Riscv u74 1 MHz timestamp
@@ -87,11 +87,11 @@ static const uint64 kLateStoreThresh = 0x0000000000020000LLU;
 #define Unused1_Flag 0x10
 #define VERSION_MASK 0x0F
 
-#define RDTSC_SHIFT 0 
+#define RDTSC_SHIFT 0
 #define OLD_RDTSC_SHIFT 6
 
 
-// Module, control must be at least version 3 
+// Module, control must be at least version 3
 static const int kRawVersionNumber = 3;
 
 static const char* kIdleName = "-idle-";
@@ -191,7 +191,7 @@ static const int kTraceBufSize = 8192;
 static const double kTraceBlocksPerMB = 16.0;
 
 static const char* soft_irq_name[] = {
-  "hi", "timer", "tx", "rx",   "block", "irq_p", "taskl", "sched", 
+  "hi", "timer", "tx", "rx",   "block", "irq_p", "taskl", "sched",
   "hrtim", "rcu", "", "",      "", "", "", "ast"
 };
 
@@ -205,7 +205,7 @@ const char* missingeventname[16] = {
 typedef map<uint64, string> U64toString;
 typedef set<uint64> U64set;
 
-// These all use a single static buffer. In real production code, these would 
+// These all use a single static buffer. In real production code, these would
 // all be std::string values, or something else at least as safe.
 static const int kMaxDateTimeBuffer = 32;
 static char gTempDateTimeBuffer[kMaxDateTimeBuffer];
@@ -223,7 +223,7 @@ typedef struct {
   double m_slope_nsec10;
 } CyclesToUsecParams;
 
-void SetParams(int64 start_cycles, int64 start_usec, 
+void SetParams(int64 start_cycles, int64 start_usec,
                int64 stop_cycles, int64 stop_usec, CyclesToUsecParams* params) {
   params->base_cycles = start_cycles;
   params->base_usec = start_usec;
@@ -270,8 +270,8 @@ const char* FormatSecondsDateTime(int32 sec) {
   if (sec == 0) {return "unknown";}  // Longer spelling: caller expecting date
   time_t tt = sec;
   struct tm* t = localtime(&tt);
-  sprintf(gTempDateTimeBuffer, "%04d-%02d-%02d_%02d:%02d:%02d", 
-         t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, 
+  sprintf(gTempDateTimeBuffer, "%04d-%02d-%02d_%02d:%02d:%02d",
+         t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
          t->tm_hour, t->tm_min, t->tm_sec);
   return gTempDateTimeBuffer;
 }
@@ -281,7 +281,7 @@ const char* FormatUsecDateTime(int64 us) {
   if (us == 0) {return "unknown";}  // Longer spelling: caller expecting date
   int32 seconds = us / 1000000;
   int32 usec = us - (seconds * 1000000);
-  snprintf(gTempPrintBuffer, kMaxPrintBuffer, "%s.%06d", 
+  snprintf(gTempPrintBuffer, kMaxPrintBuffer, "%s.%06d",
            FormatSecondsDateTime(seconds), usec);
   return gTempPrintBuffer;
 }
@@ -294,15 +294,15 @@ const char* FormatUsecDateTime(int64 us) {
 // 10 nsec and 40 nsec.
 
 inline bool Wrapped(uint64 prior, uint64 now) {
-  if (prior <= now) {return false;}	// Common case 
+  if (prior <= now) {return false;}	// Common case
   return (prior > (now + 4096));	// Wrapped if prior is larger
 }
 
 inline bool LateStore(uint64 prior, uint64 now) {
-  if (prior <= now) {return false;}		// Common case 
-  return (prior <= (now + kLateStoreThresh));	// Late store 
+  if (prior <= now) {return false;}		// Common case
+  return (prior <= (now + kLateStoreThresh));	// Late store
 }
- 
+
 // A user-mode-execution event is the pid number plus 64K
 uint64 PidToEvent(uint64 pid) {return (pid & 0xFFFF) | 0x10000;}
 uint64 EventToPid(uint64 event) {return event & 0xFFFF;}
@@ -313,19 +313,19 @@ inline bool is_cpu_description(uint64 event) {
   return false;
 }
 
-// Return true if the event is user-mode execution 
+// Return true if the event is user-mode execution
 inline bool is_contextswitch(uint64 event) {return (event == KUTRACE_USERPID);}
 
-// Return true if the event is the idle task, pid 0 
+// Return true if the event is the idle task, pid 0
 inline bool is_idle(uint64 event) {return (event == 0x10000);}
 
-// Return true if the event is user-mode execution 
+// Return true if the event is user-mode execution
 inline bool is_usermode(uint64 event) {return (event > 0xffff) && !is_idle(event);}
 
-// Return true if the event is a syscall/interrupt/trap 
+// Return true if the event is a syscall/interrupt/trap
 inline bool is_call(uint64 event) {return (event <= 0xffff) && (KUTRACE_TRAP <= event) && ((event & 0x0200) == 0);}
 
-// Return true if the event is an optimized syscall/interrupt/trap with included return 
+// Return true if the event is an optimized syscall/interrupt/trap with included return
 inline bool is_opt_call(uint64 event, uint64 delta_t) {return (delta_t > 0) && is_call(event);}
 
 // Return true if the event is a syscall/interrupt/trap return
@@ -398,7 +398,7 @@ inline bool is_user_msg_hash(uint64 event) {
   return (KUTRACE_RX_USER <= event) && (event <= KUTRACE_TX_USER);
 }
 
-// Return true if the event is RPC message processing begin/end 
+// Return true if the event is RPC message processing begin/end
 inline bool is_rpc_msg(uint64 event) {
   return (KUTRACE_RPCIDREQ <= event) && (event <= KUTRACE_RPCIDRESP);
 }
@@ -448,9 +448,9 @@ void OutputName(FILE* f, uint64 nsec10, uint64 event, uint32 argall, const char*
 }
 
 // time dur event cpu  pid rpc  arg retval IPC name(event)
-void OutputEvent(FILE* f, 
+void OutputEvent(FILE* f,
                  uint64 nsec10, uint64 duration, uint64 event, uint64 current_cpu,
-                 uint64 pid, uint64 rpc, 
+                 uint64 pid, uint64 rpc,
                  uint64 arg, uint64 retval, int ipc, const char* name) {
   // Avoid crazy big times
   bool fail = false;
@@ -462,9 +462,9 @@ void OutputEvent(FILE* f,
     return;
   }
 
-  fprintf(f, "%lld %lld %lld %lld  %lld %lld  %lld %lld %d %s (%llx)\n", 
-          nsec10, duration, event, current_cpu, 
-          pid, rpc, 
+  fprintf(f, "%lld %lld %lld %lld  %lld %lld  %lld %lld %d %s (%llx)\n",
+          nsec10, duration, event, current_cpu,
+          pid, rpc,
           arg, retval, ipc, name, event);
 }
 
@@ -487,7 +487,7 @@ string AppendHexNum(const string& name, uint64 num) {
   }
   return name;
 }
- 
+
 // Change spaces and control codes to underscore
 // Get rid of any high bits in names
 string MakeSafeAscii(string s) {
@@ -534,12 +534,12 @@ void FixupIdlePid(uint64* pid, char* pidname, U64set* idle_pids) {
 //VERYTEMP
 if (keep_idle) {return;}
       // FreeBSD has multiple idle threads named idle:xxx, with different PID numbers
-      // Map all of these to pid 0  
+      // Map all of these to pid 0
       if (memcmp(pidname , "idle:", 5) == 0) {
         idle_pids->insert(*pid);
         *pid = 0;
       }
-      // Map pid 0 name to "-idle-" 
+      // Map pid 0 name to "-idle-"
       if (*pid == 0) {strcpy(pidname, kIdleName);}
 }
 
@@ -578,17 +578,12 @@ bool handle_very_first_block (uint64* traceblock, uint64* base_usec_timestamp, C
 
       *base_usec_timestamp = start_usec;
       bool fail = false;
-      
+
       int64 delta_counts = stop_counts - start_counts;
       int64 delta_usec = stop_usec - start_usec;
       if (delta_usec <= 0) {delta_usec = 1;}	// Avoid zdiv
       double counts_per_usec = (delta_counts * 1.0) / delta_usec;
 
-      // We have some possible fixups to do on the time counter values
-      // riscv can have 1MHz counts that fit in 32 bits
-      // RPi arm-32 can have 54MHz counts that are truncated to 32 bits
-      bool has_32bit_counts = ((start_counts | stop_counts) & 0xffffffff00000000llu) == 0;
-      bool likely_rpi =   (memmem((uint8*)traceblock, 256, "Raspberry", 9) != NULL);
       bool likely_riscv = (memmem((uint8*)traceblock, 256, "u74-mc", 6) != NULL);
 
       // Risc-v fixup: u74 chip sometimes sets bogus bit<32> in stop cycles, so 4GB too large
@@ -596,7 +591,7 @@ bool handle_very_first_block (uint64* traceblock, uint64* base_usec_timestamp, C
         //fprintf(stderr, "likely riscv\n");
         //fprintf(stderr, "start_counts %016llx\n", start_counts);
         //fprintf(stderr, "stop_counts  %016llx\n", stop_counts);
-        if ((counts_per_usec > 100.1) && 
+        if ((counts_per_usec > 100.1) &&
             ((start_counts >> 32) == 0) &&
             ((stop_counts >> 32) == 1) ) {
           stop_counts &= 0x00000000FFFFFFFFLL;
@@ -607,51 +602,18 @@ bool handle_very_first_block (uint64* traceblock, uint64* base_usec_timestamp, C
         }
       }
 
-      // Arm-32 fixup:
-      // For Arm-32, the "cycle" counter is only 32 bits at 54 MHz, so wraps
-      // about every 79 seconds. This can leave stop_counts small by a few
-      // multiples of 4G. We do a fix here for exactly 54 MHz. Later, we could 
-      // find or take as input a different approximate counter frequency.
-      // These traces likely are missing the Raspberry model name
-      if (has_32bit_counts && !likely_riscv) {
-        //fprintf(stderr, "likely arm-32\n");
-        //fprintf(stderr, "rawtoevent: has_32bit_counts\n");
-        uint64 elapsed_usec = (uint64)(delta_usec);
-        uint64 elapsed_counts = (uint64)(delta_counts);
-        uint64 expected_counts = elapsed_usec * mhz_32bit_counts;
-        // Pick off the high bits
-        uint64 approx_hi = expected_counts & 0xffffffff00000000llu;
-        // Put them in
-        stop_counts |= (int64)approx_hi;
-        // Cross-check and change by 1 if right at a boundary
-        // and off by more than 12.5% from expected MHz
-        elapsed_counts = (uint64)(stop_counts - start_counts);
-        uint64 ratio = elapsed_counts / elapsed_usec;
-        if (ratio > (mhz_32bit_counts + (mhz_32bit_counts >> 3))) {
-          // High ratio; lower stop point
-          stop_counts -= 0x0000000100000000llu;
-        }
-        if (ratio < (mhz_32bit_counts - (mhz_32bit_counts >> 3))) {
-          // Low ratio; raise stop point
-          stop_counts += 0x0000000100000000llu;
-        }
-        delta_counts = stop_counts - start_counts;
-        counts_per_usec = (delta_counts * 1.0) / delta_usec;
-        fprintf(stderr, "rawtoevent: RPi fixup done.\n");
-      }
-      
-      // Record where we stand 
+      // Record where we stand
       //fprintf(stderr, "# counts per second %3.1f MHz\n", counts_per_usec);
       //fprintf(stdout, "# counts per second %3.1f MHz\n", counts_per_usec);
       if (counts_per_usec < 10.0) {
         fprintf(stderr, "rawtoevent: ... Low-resolution timestamps ...\n");
       }
-      
+
       if (verbose || hexevent) {
-        fprintf(stdout, "%% %016llx = %lldcy %lldus (%lld mod 1min)\n", 
+        fprintf(stdout, "%% %016llx = %lldcy %lldus (%lld mod 1min)\n",
           traceblock[2], start_counts, start_usec, start_usec % 60000000l);
         fprintf(stdout, "%% %016llx\n", traceblock[3]);
-        fprintf(stdout, "%% %016llx = %lldcy %lldus (%lld mod 1min)\n", 
+        fprintf(stdout, "%% %016llx = %lldcy %lldus (%lld mod 1min)\n",
           traceblock[4], stop_counts, stop_usec, stop_usec % 60000000l);
         fprintf(stdout, "%% %016llx\n", traceblock[5]);
         fprintf(stdout, "%% %016llx unused\n", traceblock[6]);
@@ -659,7 +621,7 @@ bool handle_very_first_block (uint64* traceblock, uint64* base_usec_timestamp, C
         fprintf(stdout, "\n");
       }
 
-      // Now do some error checking 
+      // Now do some error checking
       if (counts_per_usec < 0.99) {
         fprintf(stderr, "rawtoevent Fail: cycles per us %3.1f < 0.99 MHz\n", counts_per_usec);
         fail = true;
@@ -698,7 +660,7 @@ bool handle_very_first_block (uint64* traceblock, uint64* base_usec_timestamp, C
       SetParams(start_counts, start_usec, stop_counts, stop_usec, params);
 
       // Round usec down to multiple of 1 minute
-      base_minute_usec = (start_usec / 60000000) * 60000000;  
+      base_minute_usec = (start_usec / 60000000) * 60000000;
       // Backmap base_minute_usec to cycles
       base_minute_cycle = UsecToCycles(base_minute_usec, *params);
 
@@ -738,8 +700,8 @@ int main (int argc, const char** argv) {
 
   // Start timepair is set by DoInit
   // Stop timepair is set by DoOff
-  // If start_counts is zero, we got here directly without calling DoInit, 
-  // which was done in some earlier run of this program. In that case, go 
+  // If start_counts is zero, we got here directly without calling DoInit,
+  // which was done in some earlier run of this program. In that case, go
   // find the start pair as the first real trace entry in the first trace block.
   CyclesToUsecParams params;
 
@@ -757,9 +719,9 @@ int main (int argc, const char** argv) {
       maxblock = atoi(argv[i]);
     }
   }
-  
+
   for (int i = 0; i < kMAX_CPUS; ++i) {
-    current_pid[i] = 0; 
+    current_pid[i] = 0;
     current_rpc[i] = 0;
     prior_timer_irq_nsec10[i] = 0;
     at_first_cpu_block[i] = true;
@@ -796,16 +758,16 @@ int main (int argc, const char** argv) {
     // TODO: Move this to a stylized BASETIME comment
     ////fprintf(stdout, "# blocknumber %d\n", blocknumber);
     // These are stylized comments that eventtospan depends on for initial time
-    fprintf(stdout, "# [0] %016llx cpu %02llx block %d\n", 
+    fprintf(stdout, "# [0] %016llx cpu %02llx block %d\n",
             traceblock[0],
             traceblock[0] >> 56,
             blocknumber);
     fprintf(stdout, "# [1] %s cpu %02llx flags %02llx block %d\n",
             FormatUsecDateTime(traceblock[1] & 0x00fffffffffffffful),
-            traceblock[0] >> 56, 
+            traceblock[0] >> 56,
             traceblock[1] >> 56,
             blocknumber);
-    fprintf(stdout, 
+    fprintf(stdout,
             "# TS      DUR EVENT CPU PID RPC ARG0 RETVAL IPC NAME (t and dur multiples of 10ns)\n");
 
     if (verbose || hexevent) {
@@ -822,7 +784,7 @@ int main (int argc, const char** argv) {
     current_cpu = traceblock[0] >> 56;
     uint64 base_cycle = traceblock[0] & 0x00fffffffffffffful;
 
-    // traceblock[1] has flags in top byte. 
+    // traceblock[1] has flags in top byte.
     uint8 flags = traceblock[1] >> 56;
     uint64 gtod = traceblock[1] & 0x00fffffffffffffful;
 
@@ -837,7 +799,7 @@ int main (int argc, const char** argv) {
       fprintf(stderr, "rawtoevent FAIL: block[%d] gettimeofday crazy large %016llx\n", blocknumber, gtod);
       fail = true;
     }
-  
+
 
     all_flags |= flags;
     bool this_block_has_ipc = (HasIPC(flags));
@@ -856,7 +818,7 @@ int main (int argc, const char** argv) {
 // Our downstream display does badly with seconds much over 120...
 //
 // We would like the base_minute_usec to be set by the first real entry in block 1 instead...
-// Can still use paramaters here for basic time conversion. 
+// Can still use paramaters here for basic time conversion.
 // Not much issue with overflow, I think.
 //
 
@@ -885,7 +847,7 @@ int main (int argc, const char** argv) {
     uint64 prepend = base_cycle & ~0xfffff;
 
     // The base cycle count for this block may well be a bit later than the truncated time
-    // in the first real entry, and may have wrapped in its low 20 bits. If so, the high bits 
+    // in the first real entry, and may have wrapped in its low 20 bits. If so, the high bits
     // we want to prepend should be one smaller.
     uint64 first_timestamp = traceblock[first_real_entry] >> 44;
     uint64 prior_t = first_timestamp;
@@ -920,14 +882,14 @@ int main (int argc, const char** argv) {
       pid = RemapHighPid(pid);
       memcpy(pidname, reinterpret_cast<char*>(&traceblock[first_real_entry + 2]), 16);
       pidname[16] = '\0';
-      
+
       // FreeBSD has multiple idle threads named idle:xxx, with different PID numbers
       // Map all of these to pid 0 name -idle-, remembering them
       FixupIdlePid(&pid, pidname, &idle_pids);
 
       if (verbose || hexevent) {
         if (at_first_cpu_block[current_cpu]) {
-          fprintf(stderr, "rawtoevent block[%d] cpu %lld pid %lld freq %lld %s\n", 
+          fprintf(stderr, "rawtoevent block[%d] cpu %lld pid %lld freq %lld %s\n",
                   blocknumber, current_cpu, pid, freq_mhz, pidname);
         }
         fprintf(stdout, "%% %016llx pid %lld\n", traceblock[first_real_entry + 0], pid);
@@ -941,7 +903,7 @@ int main (int argc, const char** argv) {
       uint64 nameinsert = PidToEvent(pid);
       string name = MakeSafeAscii(ReduceSpaces(string(pidname)));
       names[nameinsert] = name;
-      
+
       // To allow updates of the reconstruction stack in eventtospan
       uint64 nsec10 = CyclesToNsec10(base_cycle, params);
       OutputName(stdout, nsec10, KUTRACE_PIDNAME, pid, name.c_str());
@@ -964,10 +926,10 @@ int main (int argc, const char** argv) {
         // The effect is that first-entry = ctx switch gets LOST.
         // Commenting out for the time being. dsites 2020.11.12. Fixes reconstruct bug.
         //
-        // A possible alternate design is to back up the timestamp here to just before the 
+        // A possible alternate design is to back up the timestamp here to just before the
         // first real entry.
         //
-        /////OutputEvent(stdout, nsec10, duration, event, current_cpu, 
+        /////OutputEvent(stdout, nsec10, duration, event, current_cpu,
         ////            pid, 0,  0, 0, 0, name.c_str());
 
         // Statistics: don't count as a context switch -- almost surely same
@@ -977,10 +939,10 @@ int main (int argc, const char** argv) {
         // dsites 2021.10.20 Output initial CPU frequency if nonzero
         if (at_first_cpu_block[current_cpu]) {
           at_first_cpu_block[current_cpu] = false;
-          OutputEvent(stdout, nsec10, duration, KUTRACE_USERPID, current_cpu, 
+          OutputEvent(stdout, nsec10, duration, KUTRACE_USERPID, current_cpu,
                       pid, 0,  0, 0, 0, name.c_str());
           if (0 < freq_mhz) {
-            OutputEvent(stdout, nsec10, duration, KUTRACE_PSTATE, current_cpu, 
+            OutputEvent(stdout, nsec10, duration, KUTRACE_PSTATE, current_cpu,
                         pid, 0,  freq_mhz, 0, 0, "-freq-");
            }
         }
@@ -992,7 +954,7 @@ int main (int argc, const char** argv) {
 
     // We wrapped if high bit of first_timestamp is 1 and high bit of base is 0
     if (Wrapped(first_timestamp, base_cycle)) {
-      prepend -= 0x100000; 
+      prepend -= 0x100000;
       if (TRACEWRAP) {fprintf(stdout, "  Wrap0 %05llx %05llx\n", first_timestamp, base_cycle);}
     }
 
@@ -1015,8 +977,8 @@ int main (int argc, const char** argv) {
       // +-------------------+-----------+---------------+-------+-------+
       // | timestamp         | event     | delta | retval|      arg0     |
       // +-------------------+-----------+---------------+-------+-------+
-      //          20              12         8       8           16 
-      
+      //          20              12         8       8           16
+
       uint64 t = traceblock[i] >> 44;			// Timestamp
       uint64 n = (traceblock[i] >> 32) & 0xfff;		// event number
       uint64 arg    = traceblock[i] & 0x0000ffff;	// syscall/ret arg/retval
@@ -1031,13 +993,13 @@ int main (int argc, const char** argv) {
       // Sign extend optimized retval [-128..127] from 8 bits to 16
       retval = (uint64)(((int64)(retval << 56)) >> 56) & 0xffff;
       if (verbose) {
-        fprintf(stdout, 
-                "%% [%d,%d] %05llx %03llx %04llx %04llx = %lld %lld %lld, %lld %lld %02x\n", 
+        fprintf(stdout,
+                "%% [%d,%d] %05llx %03llx %04llx %04llx = %lld %lld %lld, %lld %lld %02x\n",
                 blocknumber, i,
-                (traceblock[i] >> 44) & 0xFFFFF, 
-                (traceblock[i] >> 32) & 0xFFF, 
-                (traceblock[i] >> 16) & 0xFFFF, 
-                (traceblock[i] >> 0) & 0xFFFF, 
+                (traceblock[i] >> 44) & 0xFFFFF,
+                (traceblock[i] >> 32) & 0xFFF,
+                (traceblock[i] >> 16) & 0xFFFF,
+                (traceblock[i] >> 0) & 0xFFFF,
 		t, n, delta_t, retval, arg, ipc);
       }
 
@@ -1060,40 +1022,40 @@ int main (int argc, const char** argv) {
       // 2019.03.18 Go back to preserving KUTRACE_USERPID for eventtospan
       event = n;
 
- 
+
       // Module does
       // delta_cycles = now - tb->prior_cycles;
-      // but records just the low 20 bits of now	
+      // but records just the low 20 bits of now
       // We have to figure out here how to account for the low 20 bits wrapping:
       // prior = ppp.f8938 now = nnn.d6f66 delta = 001.de62e
       // prior + delta_lo = ppq.d6ff6 but (ppq.d6ff6 - ppp.f8938 fits in 20 bits, so would not have generated a tsdelta
       // prior + delta = ppr.d6ff6
- 
+
 
 /*
- * In recording a trace event, it is possible for an interrupt to happen after 
+ * In recording a trace event, it is possible for an interrupt to happen after
  * KUtrace code takes the event timestamp and before it claims the storage location.
- * In this case, the interupt handling will recursively record several events 
+ * In this case, the interupt handling will recursively record several events
  * before returning to the original KUtrace path, which then claims a location
  * and stores the original event with its earlier timestamp. This is called a
  * "late store." When that happens, the reconstruciton in rawtoevent needs to
  * decide whether time went forward by almost the entire 20-bit wraparound
  * period, or went backward by some amount.
- * 
+ *
  * To resolve this ambiguity, we declare that a time gap of 7/8 of the wraparound
  * period is forward time and the high 1/8 is backward time associated with an
  * otherwise undetectable backward time.
- * 
+ *
  * To mark forward time in that 1/8 (and above), we add a TSDELTA entry to the
- * trace. The exact compare for late store must be identical in kutrace_mod.c 
+ * trace. The exact compare for late store must be identical in kutrace_mod.c
  * and in rawtoevent.cc.
- * 
+ *
  */
 
       // If TSDELTA entry, increment the prepend value.
       // argall has the time difference between this entry and previous one,
       // in units of timestamp ticks (10-20nsec).
-      // If time goes backward a little, difference will be large,  otherwise it will 
+      // If time goes backward a little, difference will be large,  otherwise it will
       // be a small number of millions.
       // A threshold of 2,000,000,000 is good for separating large, which we ignore
       if (n == KUTRACE_TSDELTA) {
@@ -1110,7 +1072,7 @@ int main (int argc, const char** argv) {
           uint64 oldfull = (prepend | prior_t);	// Old prepend old t
           uint64 newfull = oldfull + (0xFFFFFFFF00000000LLU | argall); // sign extend arg
 
-          // Use newfull, but do not update prepend. Doing so would ... 
+          // Use newfull, but do not update prepend. Doing so would ...
           prepend = newfull & ~0xfffffLLU;
           t =       newfull &  0xfffffLLU;
           prior_t = t;
@@ -1124,14 +1086,14 @@ int main (int argc, const char** argv) {
         }
       }
 
-      
+
       // tfull is increments of cycles from the base minute for this trace
       uint64 tfull = prepend | t;
       prior_t = t;
 
       // nsec10 is increments of 10ns from the base minute.
-      // For a trace starting at 50 seconds into a minute and spanning 99 seconds, 
-      // this reaches 14,900,000,000 which means the 
+      // For a trace starting at 50 seconds into a minute and spanning 99 seconds,
+      // this reaches 14,900,000,000 which means the
       // base minute + 149.000 000 00 seconds. More than 32 bits.
       uint64 nsec10 = CyclesToNsec10(tfull, params);
       uint64 duration = 0;
@@ -1144,7 +1106,7 @@ int main (int argc, const char** argv) {
         else {deferred_rpcid0 = true;}
       }
 
-      // Pick out any name definitions 
+      // Pick out any name definitions
       if (is_namedef(n)) {
         has_arg = true;
         // We have a name or other variable-length entry
@@ -1181,14 +1143,14 @@ int main (int argc, const char** argv) {
         if (!is_timepair(n)) {
           memset(tempstring, 0, 64);
           memcpy(tempstring, &traceblock[i + 1], (len - 1) * 8);
-          
+
           if (is_pidnamedef(n)) {
             // FreeBSD has multiple idle threads named idle:xxx, with different PID numbers
             // Map all of these to pid 0 name -idle-, remembering them
             FixupIdlePid(&arg, tempstring, &idle_pids);
             nameinsert = PidToEvent(arg); 	  // Processes 0..64K
           }
-          
+
           // Remember the name, except throw away the empty name
           string name = string(tempstring);
           if (is_modelnamedef(n)) {
@@ -1216,16 +1178,16 @@ int main (int argc, const char** argv) {
         extra_word = true;
         continue;
       }
-      
+
       if (is_cpu_description(n)) {	// Just pass it on to eventtospan
-        OutputEvent(stdout, nsec10, 1, event, current_cpu, 
+        OutputEvent(stdout, nsec10, 1, event, current_cpu,
                     0, 0, argall, 0, 0, "");
       }
 
       if (keep_just_names) {continue;}
 
       //========================================================================
-      // Name definitions above skip this code, so do not affect lo/hi 
+      // Name definitions above skip this code, so do not affect lo/hi
       if (lo_timestamp > nsec10) {lo_timestamp = nsec10;}	// stats
       if (hi_timestamp < nsec10) {hi_timestamp = nsec10;}	// stats
 
@@ -1289,21 +1251,21 @@ int main (int argc, const char** argv) {
       // +-----------+---+-----------------------------------------------+
       // | event     |///|               PC                              |
       // +-----------+---+-----------------------------------------------+
-      //      12       4                 48 
+      //      12       4                 48
       // (2) Current scaffolding
       // +-------------------+-----------+---------------+-------+-------+
       // | timestamp         | event     |    zeros      |      arg0     |
       // +-------------------+-----------+---------------+-------+-------+
       // |                               PC                              |
       // +---------------------------------------------------------------+
-      //                                 64 
+      //                                 64
       // Just deal with form (2) right now
       //
       // 2021.04.05 We now include the CPU frequency sample as arg0 in this entry if nonzero.
       //   Extract it as a separate KUTRACE_PSTATE event.
-      //   Strictly speaking, the event number for PC_TEMP should be 0x121 to signify 
+      //   Strictly speaking, the event number for PC_TEMP should be 0x121 to signify
       //   two words, but it is in fact just 0x101.
-      // 
+      //
       if (is_pc_sample(n)) {
         has_arg = true;
         extra_word = true;
@@ -1312,7 +1274,7 @@ int main (int argc, const char** argv) {
         // Change PC_TEMP to either kernel or user sample address
         event = n = (pc_sample & 0x8000000000000000LLU) ? KUTRACE_PC_K : KUTRACE_PC_U;
 
-        // The PC sample is generated after the local_timer interrupt, but we really 
+        // The PC sample is generated after the local_timer interrupt, but we really
         // want its sample time to be just before that interrupt. We move it back here.
         if (prior_timer_irq_nsec10[current_cpu] != 0) {
           nsec10 = prior_timer_irq_nsec10[current_cpu] - 1;	// 10 nsec before timer IRQ
@@ -1322,15 +1284,15 @@ int main (int argc, const char** argv) {
 						// This is used for drawing color
 						// If addrtoline is used later, reset arg
         retval = 0;
-        ipc = 0; 
+        ipc = 0;
         char temp_hex[24];
         sprintf(temp_hex, "PC=%012llx", pc_sample);	// Normally 48-bit PC
-        name = string(temp_hex); 
+        name = string(temp_hex);
 
         // Output the frequency event first if nonzero
-        if (0 < freq_mhz) { 
-          OutputEvent(stdout, nsec10, 1, KUTRACE_PSTATE, current_cpu, 
-                      current_pid[current_cpu], current_rpc[current_cpu], 
+        if (0 < freq_mhz) {
+          OutputEvent(stdout, nsec10, 1, KUTRACE_PSTATE, current_cpu,
+                      current_pid[current_cpu], current_rpc[current_cpu],
                       freq_mhz, 0, 0, "-freq-");
           ++event_count;	// stats
         }
@@ -1388,7 +1350,7 @@ int main (int argc, const char** argv) {
       // +-------------------+-----------+-------------------------------+
       // | timestamp         | event     |              arg              |
       // +-------------------+-----------+-------------------------------+
-      //          20              12                    32 
+      //          20              12                    32
       if (is_mark_abc(n)) {
         has_arg = true;
         // Include the marker label string, from all 32 bits af argument
@@ -1400,15 +1362,15 @@ int main (int argc, const char** argv) {
 
       // Debug output. Raw 64-bit event in hex
       if (hexevent) {
-        fprintf(stdout, "%05llx.%03llx ", 
-          (traceblock[entry_i] >> 44) & 0xFFFFF, 
+        fprintf(stdout, "%05llx.%03llx ",
+          (traceblock[entry_i] >> 44) & 0xFFFFF,
           (traceblock[entry_i] >> 32) & 0xFFF);
         if (has_arg) {
-          fprintf(stdout, " %04llx%04llx ", 
-            (traceblock[entry_i] >> 16) & 0xFFFF, 
+          fprintf(stdout, " %04llx%04llx ",
+            (traceblock[entry_i] >> 16) & 0xFFFF,
             (traceblock[entry_i] >> 0) & 0xFFFF);
         } else {
-          fprintf(stdout, "          "); 
+          fprintf(stdout, "          ");
         }
       }
 
@@ -1420,24 +1382,24 @@ int main (int argc, const char** argv) {
         // If event is syscall/ret 511 and no name, then we have a trace file
         // using 511 for -sched- mismatched with a more recent kutrace_control_names.h
         // Fix them right here
-        if (event == 0x9ff) {strcpy(temp, "-sched-");} 
-        if (event == 0xdff) {strcpy(temp, "-sched-");} 
-        if (event == 0xbff) {strcpy(temp, "/-sched-");} 
-        if (event == 0xfff) {strcpy(temp, "/-sched-");} 
+        if (event == 0x9ff) {strcpy(temp, "-sched-");}
+        if (event == 0xdff) {strcpy(temp, "-sched-");}
+        if (event == 0xbff) {strcpy(temp, "/-sched-");}
+        if (event == 0xfff) {strcpy(temp, "/-sched-");}
         name = string(temp);
       }
 
       // Output the trace event
       // Output format:
       // time dur event cpu  pid rpc  arg retval IPC name(event)
-      OutputEvent(stdout, nsec10, duration, event, current_cpu, 
-                  current_pid[current_cpu], current_rpc[current_cpu], 
+      OutputEvent(stdout, nsec10, duration, event, current_cpu,
+                  current_pid[current_cpu], current_rpc[current_cpu],
                   arg, retval, ipc, name.c_str());
       // Update some statistics
       ++event_count;	// stats
 
       if (hexevent && extra_word) {
-        fprintf(stdout, "   %16llx\n", traceblock[entry_i + 1]); 
+        fprintf(stdout, "   %16llx\n", traceblock[entry_i + 1]);
       }
 
       // Do deferred switch to rpcid = 0
@@ -1458,14 +1420,14 @@ int main (int argc, const char** argv) {
 
   fclose(f);
 
-  // Pass along the OR of all incoming raw traceblock flags, in particular IPC_Flag 
+  // Pass along the OR of all incoming raw traceblock flags, in particular IPC_Flag
   fprintf(stdout, "# ## FLAGS: %d\n", all_flags);
 
 
   // Reduce timestamps to start at no more than 60 seconds after the base minute.
   // With wraparound tracing, we don't know the true value of lo_timestamp until
-  // possibly the very last input block. So we offset here. The output file already 
-  // has the larger times so eventtospan will reduce those. 
+  // possibly the very last input block. So we offset here. The output file already
+  // has the larger times so eventtospan will reduce those.
   uint64 extra_minutes = lo_timestamp / 6000000000l;
   uint64 offset_timestamp = extra_minutes * 6000000000l;
   lo_timestamp -= offset_timestamp;
@@ -1480,18 +1442,18 @@ if (hi_seconds > 999.0) {fprintf(stderr,"BUG: hi_seconds > 999.0 %12.8f\n", hi_s
     hi_seconds = 1.0;
     total_seconds = 1.0;	// avoid zdiv
   }
-  // Pass along the time bounds 
+  // Pass along the time bounds
   fprintf(stdout, "# ## TIMES: %10.8f %10.8f\n", lo_seconds, hi_seconds);
 
 
   uint64 total_cpus = unique_cpus.size();
   if (total_cpus == 0) {total_cpus = 1;}	// avoid zdiv
-   
-  //fprintf(stderr, "rawtoevent(%3.1fMB):\n", blocknumber / kTraceBlocksPerMB); 
-  //fprintf(stderr, 
+
+  //fprintf(stderr, "rawtoevent(%3.1fMB):\n", blocknumber / kTraceBlocksPerMB);
+  //fprintf(stderr,
   //        "  %s,  %lld events, %lld CPUs  (%1.0f/sec/cpu)\n",
   //        FormatSecondsDateTime(base_usec_timestamp / 1000000),
-  //        event_count, total_cpus, (event_count / total_seconds) /total_cpus); 
+  //        event_count, total_cpus, (event_count / total_seconds) /total_cpus);
   uint64 total_irqs  = events_by_type[5] + events_by_type[7];
   uint64 total_traps = events_by_type[4] + events_by_type[6];
   uint64 total_sys64 = events_by_type[8] + events_by_type[9] +
@@ -1500,14 +1462,14 @@ if (hi_seconds > 999.0) {fprintf(stderr,"BUG: hi_seconds > 999.0 %12.8f\n", hi_s
                        events_by_type[14] + events_by_type[15];
 
   //fprintf(stderr, "  %lld IRQ, %lld Trap, %lld Sys64, %lld Sys32, %lld Mark\n",
-  //        total_irqs, total_traps, total_sys64, total_sys32, total_marks); 
-  //fprintf(stderr, "  %lld PIDs, %lld context-switches (%1.0f/sec/cpu)\n", 
+  //        total_irqs, total_traps, total_sys64, total_sys32, total_marks);
+  //fprintf(stderr, "  %lld PIDs, %lld context-switches (%1.0f/sec/cpu)\n",
   //        (u64)unique_pids.size(), ctx_switches, (ctx_switches / total_seconds) / total_cpus);
 
-  fprintf(stderr, "rawtoevent: %llu events\n", event_count); 
-  fprintf(stderr, 
-          "  %5.3f elapsed seconds: %5.3f to %5.3f\n", 
-          total_seconds, lo_seconds, hi_seconds); 
+  fprintf(stderr, "rawtoevent: %llu events\n", event_count);
+  fprintf(stderr,
+          "  %5.3f elapsed seconds: %5.3f to %5.3f\n",
+          total_seconds, lo_seconds, hi_seconds);
 
 }
 
