@@ -1,0 +1,7 @@
+This directory contains the source for the KUtrace loadable module, and its
+Makefile. The make uses the kernel exported symbols on the compilation machine.
+These need to include the exported KUtrace symbols from applying kernel patches.
+
+All the code is open sourced under the BSD three-clause license, except the
+loadable module and patches which is required by Linux to be licensed under
+GPL.
