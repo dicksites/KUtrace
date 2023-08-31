@@ -1,8 +1,13 @@
 <!DOCTYPE html>
 <html>
 <meta charset="UTF-8">
-<!-- Copyright 2022 Richard L. Sites -->
- 
+<!-- Copyright 2023 Richard L. Sites -->
+<!-- Add slanted overlay -->
+<!-- Add LLC misses support -->
+<!--   NOTE: Be sure to update script_edit_date -->
+<!-- 2023.07.26 Add live mouse event tracking --> 
+<!-- 2023.07.31 Shift-righclick Y-axis labels for highlight ignores numbers now --> 
+
 <head>
  
 <style> /* set the CSS */
@@ -177,6 +182,7 @@ var myString = '  {  "Comment" : "V2 with IPC field",  "axisLabelX" : "Time (sec
 // axisLabelX	: text label
 // axisLabelY	: text label
 // flags	: int 128=hasIPC
+//              :      32=hasLLC
 // shortMulX	: int scale factor for X-axis; always 1
 // shortUnitsX	: text units; always "s" for seconds
 // thousandsX	: int multiplier; 1000 or 1024
@@ -384,7 +390,7 @@ var myString = '  {  "Comment" : "V2 with IPC field",  "axisLabelX" : "Time (sec
 //----------------------------------------------------------------------------//
 
 // Version control for this file
-var script_edit_date = "(ver2022-07-14)";  // Shown in secondary menu for identification
+var script_edit_date = "(ver2023-07-31)";  // Shown in secondary menu for identification
 
 var book = false;		// Set true to get defaults for creating book diagrams
 
@@ -429,6 +435,7 @@ const kDummyData = {
               [999.0, 0, 0, 0, 0, 0, 0, 0, 0, "x"]]
 };
 
+const dotsbase =    -6;
 const annotbase =   -5;
 const calloutbase = -4;
 const arcbase =     -3;
@@ -465,6 +472,22 @@ const searchlistMaxDisplay = 7;
 // Pixel-banging in layout
 const min_txt_px = 12;		// Minimum font size px for annotation text lines
 const rpcfontsize = 12;		// Font size px for RPC message numbers
+
+// LLC misses (just misses, not writebacks)
+// Miss count per timespan is encoded into 4 bits as power of two buckets:
+// 0:0  1:1-7  2:8..15  3:16..31  ...  14:32K..64K-1  15:64K+
+//
+// We turn these in to nanoseconds of memory-bus occupancy by estimating 50ns
+// for a single miss and derating multiple misses by a factor of 1.1 for each
+// bucket, so down by a factor of 2 after 8 buckets and about 4.5 for bucket 15.
+// This very roughly approximates overlapped multiple outstanding misses.
+// The table here maps bucket number 0..15 to nanoseconds of memory activity.
+// These values are extremely rough and only given to two digits.
+const kLlcNsec = [
+  0, 100, 450, 820,             1500, 2700, 5000, 9000, 
+  16000, 30000, 54000, 98000,   180000, 320000, 590000, 1100000
+];
+
 
 //----------------------------------------------------------------------------//
 // Global constant colors                                                     //
@@ -697,8 +720,9 @@ var basictextsize = 12;		// Calculated at window size change (px)
 var debug = false;		// show debugging options 
 // moved to state: var fade = 0;			// 0: color, 1: gray KUI, 2: gray KUI/cexit/wait
 
-var timerHandle;	// For fewer redraws of events (faster with big pan/zoom)
+var timerHandle;		// For fewer redraws of events (faster with big pan/zoom)
 
+var ipc_really_llc = false;	// Reset on data load if 4-bit IPC field is really LLC misses
 
 const prefixCpu = 0;
 const prefixPid = 1;
@@ -747,6 +771,7 @@ const basetime0_value_max = 1;		// 0: normal, 1: relative to row start, /* 2: su
 const compress_value_max = 2;		// 0: none, 1: coloronly, 2: all
 const minmax_units_max = 2;		// 0: nsec, 1: usec, 2: msec
 const annottype_max = 1;		// 0: normal, 1: notched line
+const hack_value_max = 1;		// For random trials. Toggled by CB button shift-click
 
 // Secondary menu
 const legend_max = 2;			// 0: off, 1: vertical, 2: horizontal
@@ -782,7 +807,17 @@ const region4paramW = [5, 20, 80];	// IPC legend gets 5% of width
 const region2charsparamW = [100, 12, 30];	// Y-axis labels 18..24 chars
 
 const ipcvalues = ["0", "1/8", "1/4", "3/8",  "1/2", "5/8", "3/4", "7/8", 
-                 "1.0", "1.25", "1.5", "1.75",  "2.0", "2.5", "3.0", "3.5"];
+                   "1.0", "1.25", "1.5", "1.75",  "2.0", "2.5", "3.0", "3.5"];
+//const llcvalues = ["0us", "0.05", "0.12", "0.22",  "0.45", "0.82", "1.5", "2.7", 
+//                   "5", "9", "16", "30",  "54", "98", "180", "320"];
+//const llcvalues = ["0", "1", "2-3", "4-7",  "12", "24", "48", "96", 
+//                   "192", "384", "768", "1.5K",  "3K", "6K", "12K", "24K+"];
+//const llcvalues = ["0", "64B", "128", "256",  "512", "1KB", "2KB", "4KB", 
+//                   "8KB", "16K", "32K", "64K",  "128K", "256K", "512K", "1M+"];
+// 2023.06.25 encoding
+const llcvalues = ["0", "64+", "512", "1KB",       "2KB", "4KB", "8KB", "16K", 
+                   "32K", "64K", "128K", "256K",   "512K", "1M", "2M", "4M+"];
+
 const ipc_color = ["#555555", "#0000FF", "#0000FF", "#AA0000"]; 
 //         dark gray < 1/2    1/2 <= blue < 2     dark red >= 2
 
@@ -1065,6 +1100,7 @@ var state = {
   ////basetime0_value: 0,
 
   hilite_evnum : 0,		// Shift-RIGHT-click on an event highlights all of them
+  hilite_evnum2 : 0,		// previous highlight, so youcan have two at once onscreen
   just_reset: true,		// Controls initial display of kernel and CPU model
 
   // List of items that are annotated on screen
@@ -1145,6 +1181,7 @@ var state2 = {
   usec_lo_time: 0,		// Actually nsec/usec/msec now
   usec_hi_time: 0,		//  see state2.minmax_units_value 
   basetime0_value: 0,
+  hack_value: 0,		// For random trials
 
   // Last single item annotated, even across pan/zoom
   annotated_one_d: -1,		// subscript of nearest previously-annotated highlited item
@@ -1239,7 +1276,7 @@ var vx1, vx2;
 var mx1, my1;			// First point for mousemove drag
 var originalx, originaly;	// Initial values for delta updates callout drag
 var dragging_bubble;		// Callout drag
-var dragging_spike;		// Callout drag
+var dragging_spike;		// Callout drag 
 var d1, d2;		// First and second marked data objects
 
 
@@ -1389,6 +1426,7 @@ console.log("initializeState");
   state2.ovhd_value = 1;
   if (state2.lock_value != -1) {state2.lock_value = 2;}
   state2.cb_value = 0;
+  state2.hack_value = 0;
   aspecth = 0;
   aspectv = 0;
   state2.samp_value = 0;
@@ -1416,11 +1454,12 @@ console.log("initializeState");
 
 ////  state.hilite_event_array = [];
   hilite_event_set.clear();
-  state2.rowToHilite.fill(0);
+  state2.rowToHilite.fill(false);
 
   state.annotated_d = [];
   state2.annotated_one_d = -1;
   state.hilite_evnum = 0;
+  state.hilite_evnum2 = 0;
 
   state2.minmax_units_value = 1;		// usec
   state.just_reset = true;
@@ -1459,7 +1498,6 @@ console.log("browser:", thisbrowser);
   }
 
 
-
   //
   // Design: highlight a row shows it in color and its kernel/user in color on other rows
   //  this covers all events in that row, not just those onscreen.
@@ -1477,9 +1515,7 @@ console.log("browser:", thisbrowser);
   //  - non-highlighted row with no highlighted events. partial height all gray.
   //  This last, only, might be better done with no annotes, no markers, and no ipc,
 
-
 }
-
 
 
 // Accessor functions for 10-element events
@@ -1575,6 +1611,7 @@ function is_oval(d) {return ev(d) == -2;}
 function is_arc(d) {return ev(d) == -3;}
 function is_callout(d) {return ev(d) == -4;}
 function is_annot(d) {return ev(d) == annotbase;}
+function is_dots(d) {return ev(d) == dotsbase;}
 function is_overlay(d) {return (ev(d) < 0) && !is_arc(d);}
 function is_any_overlay(d) {return (ev(d) < 0);}
 
@@ -1878,6 +1915,9 @@ function onscreen_all_y(d) {
 }
 
 
+// Truncate to 0.5 unit
+function Trunc5(x) {return Math.trunc(x * 2) / 2;}
+
 // Round to zero decimal places
 function Rnd0(x) {return Math.round(x);}
 
@@ -1964,10 +2004,40 @@ function draw_ipcmark(dotg, centerx, centery, size, ipcd, legend) {
   dotg.append("path")
     .attr("class", legend ? "ipcmarkl" :"ipcmark")
     .attr("d",  path)
-    .attr("fill", "#FFFFFF")		// white
+    .attr("fill", ipc_really_llc ? "#FFC080" : "#FFFFFF")	// white (orangle llc)
     .attr("stroke-width", strokewidth)	
     .attr("stroke", ipc_color[ipcd >> 2]);	// gray/blue/red
 }
+
+// Draw a line centered at centerx roughly indicating memory-bus busy
+function draw_llcmark(dotg, centerx, centery, size, d, legend) {
+  var ipcd = ipc(d);
+  if (ipcd == 0) {return;}
+
+  // Rough second duration of memory activity, but <= the timespan duration - 60ns
+  var duration = kLlcNsec[ipcd] / 1000000000.0;
+  var toobig = false;
+  if (dur(d) < duration) {
+    duration = dur(d) - 0.000000060;
+    toobig = true;
+  }
+  // seconds duration to pixels
+  var llcpx = Rnd5(duration / xsecperpix);
+  if (llcpx < 2) {return;}
+
+  var offset = size * 0.833;
+  var strokewidth = Rnd1(size / 20);
+  path = "M" + (centerx - llcpx/2) + "," + (centery + offset) + " h" + (llcpx);
+  dotg.append("path")
+    .attr("class", legend ? "ipcmarkl" :"ipcmark")
+    .attr("d",  path)
+    .attr("stroke-width", strokewidth)	
+    .attr("stroke", toobig ? "#FF0080" : "#FF8000");	// orange (red if too big)
+      
+  // Put in small speedometer arrow
+   draw_ipcmark(dotg, centerx, centery, size * 0.75, ipc(d), legend);
+}
+
 
 function draw_emptylegend(lx, ly, lheight, lwidth) {
   d3.selectAll(".ipclegend").remove();
@@ -2007,7 +2077,7 @@ function draw_ipclegend(lx, ly, lheight, lwidth) {
     .attr("fill", "black")
     .attr("font-family", "sans-serif")
     .style("text-anchor", "left")
-    .text("IPC");
+    .text(ipc_really_llc ? "Miss" : "IPC");
 
   var iincr = (txtmul >= 1.5) ? 2 : 1;
 
@@ -2024,7 +2094,7 @@ function draw_ipclegend(lx, ly, lheight, lwidth) {
       .attr("fill", "black")
       .attr("font-family", "sans-serif")
       .style("text-anchor", "left")
-      .text(ipcvalues[i]);
+      .text(ipc_really_llc ? llcvalues[i] : ipcvalues[i]);
   }
 }
 
@@ -2159,6 +2229,7 @@ function draw_annotateall() {
   state.annotated_d = [];
   state2.annotated_one_d = -1;
   state.hilite_evnum = 0;
+  state.hilite_evnum2 = 0;
 
   dont_annotate = [];
   dont_annotate[0x10000] = true;	// Never label -idle- event
@@ -2232,11 +2303,26 @@ function draw_one_ipc(d, x0, y0, e_height) {
     var centerx = x0;
     var centery = y0;
     var ipcd = ipc(d);
-    draw_ipcmark(innersvgdotg, centerx, centery, e_height, ipcd, false);
+    if(ipc_really_llc) {
+      draw_llcmark(innersvgdotg, centerx, centery, e_height, d, false);
+    } else {
+      draw_ipcmark(innersvgdotg, centerx, centery, e_height, ipcd, false);
+    }
   }
 }
 
+// Cycyle through drawing mark_a/c and/or mark_b/d
 function draw_one_mark(row, d, x0, y0) {
+  var draw_bd = (state2.marks_value & 1) != 0;
+  var draw_ac = (state2.marks_value & 2) != 0;
+  var is_ac = (ev(d) == 0x20A) || (ev(d) == 0x20C);
+  var is_bd = (ev(d) == 0x20B) || (ev(d) == 0x20D);
+  if ((is_ac && draw_ac) || (is_bd && draw_bd)) {
+    draw_mark(row, d, x0, y0);
+  }
+}
+
+function draw_one_mark_old(row, d, x0, y0) {
   var draw_numeric = (state2.marks_value & 1) != 0;
   var draw_text = (state2.marks_value & 2) != 0;
   if ((draw_text && ev(d) != 0x20D) || (draw_numeric && ev(d) == 0x20D)) {
@@ -2327,6 +2413,73 @@ function draw_oval(d, left_t, right_t) {
       .attr("fill-opacity", 0.8);
 }
 
+// Draw diagonal orange overlay
+function draw_diag_orange (x0, x1) {
+  // One track is region234height / ydomainwidth pixels
+  // One row is  ypixpertrack * maxTrackHeight pixels 
+  var rows = (ybot_row + 1) - ytop_row;
+  var pxperrow =  region234height / rows;
+  // 1/4 of a row margin on top and bottom of diagonal lines
+  var orangemargin = Rnd0((pxperrow * 0.25));
+  var xleft = Rnd0(x0);
+  var ytop = orangemargin;
+  var ybottom = region234height - orangemargin;
+  var rect_width = Rnd0(x1 - x0);
+  var rect_height = Rnd0(region234height - (2 * orangemargin));
+  var tilt_xpx = Rnd0(region234height * 0.07);	// About a 4 degree slant. sin(4) = 0.0698
+
+  var rectpath = "M" + 0 + "," + orangemargin + " h" + rect_width + " v" + rect_height + " h" + (-rect_width) + " Z";
+
+  // Make a clipping rectangle sub-group
+  var innersvgdotgsvg = innersvgdotg.append("svg")
+      .attr("class", "graphlinex") 
+      .attr("x", xleft)
+      .attr("y", ytop)
+      .attr("width", rect_width)
+      .attr("height", rect_height);
+
+  innersvgdotgsvgdotg = innersvgdotgsvg.append("g");
+
+  // Light orange fill, semi-transparent
+  //innersvgdotgsvgdotg.append("path")
+  //    .attr("class", "graphlinex") 
+  //    .attr("d",  rectpath)   
+  //    .attr("fill", "#FFEEDD")
+  //    .attr("fill-opacity", 0.5); 
+
+  // Light orange border to give some definition, semi-transparent
+  innersvgdotgsvgdotg.append("path")
+      .attr("class", "graphlinex") 
+      .attr("d",  rectpath)   
+      .attr("fill", "none")
+      .attr("stroke-width", 6)		// Half is clipped off
+      .attr("stroke", "#FFEEDD")	// light orange
+      .attr("stroke-opacity", 0.5); 
+
+  // Multiple diagonal organge lines
+  for (var j = xleft - tilt_xpx; j < x1; j+=11) {
+    var path = "M" + (j - xleft) + "," + (ybottom) + " l" + tilt_xpx + "," + (-rect_height);
+    innersvgdotgsvgdotg.append("path")
+      .attr("class", "graphlinex")
+      .attr("d",  path)
+      .attr("fill", "none")
+      .attr("stroke", "#FF8000")
+      .attr("stroke-width", 2);
+  }
+}
+
+// Draw diagonal orange lines spaced 11px. 
+// For hack showing some area of interest
+function draw_dots(d, left_t, right_t) {
+  if (state2.hack_value == 0) {return;}
+
+  var x0 = x_zoomed(ts(d));
+  var x1 = x_zoomed(tsend(d));
+  if (cpu(d) == 0) {
+    draw_diag_orange(x0, x1);
+  }
+}
+
 // Rotate <x,y> w.r.t. <0.0>
 function xyrotate(xypair, sincospair) {
   var xyresult = {x:0, y:0};
@@ -2343,12 +2496,13 @@ function draw_arc(d, x0, y0, x1, y1) {
   var right_x = x1;
 
   // Suppress arcs that are a small fraction of the display window
-  //  if the window width is greater than 5 milliseconds
-  //  if bold, show all arcs
+  //  suppress if the window width is greater than 5 milliseconds
+  //  but if bold, show all arcs
+  //  or if hack is set, show all arcs
   var bold = (state2.arcs_value == 1);
   var short_span = ((right_x - left_x) < (region3width * arcfraction));
   var long_window = (xdomainwidth > 0.005);
-  if (short_span && long_window && !force_annot && !bold) {return;}
+  if (short_span && long_window && !force_annot && !bold && (state2.hack_value == 0)) {return;}
 
   var left_y = y0;
   var right_y = y1;
@@ -2530,6 +2684,8 @@ function overlaydraw(d, gray) {
     draw_bracket(d, left_t, right_t);
   } else if (is_oval(d)) {
     draw_oval(d, left_t, right_t);
+  } else if (is_dots(d)) {
+    draw_dots(d, left_t, right_t);
   } else if (is_callout(d)) {
     draw_callout(d, left_t, right_t);
   } else if(!gray && is_arc(d)) {
@@ -3071,6 +3227,7 @@ function draw_idle(d, x0, y0, x1, gray, e_height) {
     }
 }
 
+
 // More to do in refactoring...
 // This does all the actual drawing from pixel values within innersvgdotg.
 // All the tracks and decisions and combining have been factored out.
@@ -3099,6 +3256,11 @@ function slowDrawOnRow(row, d, gray) {
     // Too small to see well -- draw as single line
     fastDrawOnRow(row, d, gray);
     return;
+  }
+
+// Hack: if hack is on and we are drawing local_timer, make it at least 5 pixels wide
+  if ((state2.hack_value != 0) && (ev(d) == 1516)) {
+    x1 = Math.max(x1, x0 + 5);
   }
 
   var path = "M" + Rnd1(x0) + "," + Rnd1(y0) + " H" + Rnd1(x1);
@@ -3332,6 +3494,15 @@ function draw_on_row(row, d, gray) {
   // Always draw RPC lines and raw packets
   if (is_rpcpkt(d)) {can_defer = false;}
   if (is_pkt(d)) {can_defer = false;}
+  if (is_dots(d)) {
+    can_defer = false;
+  }
+
+// Hack: if hack is on and we are drawing local_timer, make it at least 5 pixels wide
+  if ((state2.hack_value != 0) && (ev(d) == 1516)) {
+    can_defer = false;
+  }
+
 
   // Important performance optimization with 1M events 
   if (can_defer && ((defer_dur[row] + dur(d)) < xsecperpix)) {
@@ -3391,7 +3562,12 @@ function draw_on_row(row, d, gray) {
 function eventHilite(i) {
   var d = data.events[i];
   if ((0 < state.fade) && is_kui(d)) {return false;}
-  if (state.hilite_evnum != 0) {return (ev(d) == state.hilite_evnum);}
+  if (state.hilite_evnum != 0) {
+    // One or two right-clicked events
+    if ((state.hilite_evnum != 0) && (ev(d) == state.hilite_evnum)) {return true;}
+    if ((state.hilite_evnum2 != 0) && (ev(d) == state.hilite_evnum2)) {return true;}
+    return false;
+  }
   if (hilite_event_set.size == 0) {return true;}
   return hilite_event_set.has(i);
 }
@@ -3399,7 +3575,7 @@ function eventHilite(i) {
 
 // Full height if in set, treating empty set as highlight-all
 function rowFullsize(row) {
-  if (state2.grouphashilite[getGroup(row)] == 0) return true;
+  if (state2.grouphashilite[getGroup(row)] == false) return true;
   return state2.rowToHilite[row];
 }
 
@@ -3491,6 +3667,7 @@ function fastdrawevents() {
     }
 
     // Accumulate all on-screen events that match hilite_evnum
+    // Do not count secondary evnum2 matches
     //   (follow logic in annotatesearch2)
     if ((ev(d) == state.hilite_evnum) && 
         strictly_startsonscreen_x(d) && onscreen_all_y(d)) {
@@ -3720,13 +3897,36 @@ function do_zoomed_y() {
 //console.log("end do_zoomed_y ----------");
 }
  
+function CheckHilites(label, hilite) {
+  var ok = true;
+  for (var i = 0; i < hilite.length; ++i) {
+    if (1 < hilite[i]) {ok = false;}
+    if (hilite[i] < 0) {ok = false;}
+  }
+  if (!ok) {console.log(label, "FAIL", hilite);}
+}
+
+// Expecting two equal arrays
+function CheckSame(a, b) {
+  if (a.length != b.length) {
+    console.log("CheckSame length mismatch:", a.length, b.length);
+    console.log(a, b);
+    return;
+  }
+  for (var i = 0; i < a.length; ++i) {
+    if (a[i] != b[i]) {
+      console.log("CheckSame element mismatch:", i, a[i], b[i]);
+    }
+  }
+}
+
 
 // Recalculate event highlights from just the highlighted rows
 function RecalcEventHilites() {
   hilite_event_set.clear();
   for (var row = 0; row < sortNumSize; ++row) {
     if (state2.rowToHilite[row]) {
-      setEventHilites(row, 1);
+      setEventHilites(row, true);
     }
   }
 }
@@ -3741,6 +3941,7 @@ function RecalcGroupHilites() {
 
 // Recalculates globals derived from just-changed main state
 function RecalcDerivedState() {
+  CheckHilites("Recalc",  state2.rowToHilite);
   calc_regionheightwidth();
   currentcolor = (state2.cb_value == 0) ? normalcolor : colorblindcolor;
   RecalcEventHilites();		// from rowToHilite
@@ -3776,7 +3977,7 @@ function CompressHilite(hilite) {
     if (hilite[i] != 0) {
       InsertZerocount(zerocount, retval);
       zerocount = 0;
-      retval.push(hilite[i]);
+      retval.push(+hilite[i]);
     } else {
       ++zerocount;
     }
@@ -3785,16 +3986,17 @@ function CompressHilite(hilite) {
   return retval;
 }
 
-// Replace values >= 2 with that many zero elements. Idempotent if already decompressed.
+// Replace values >= 2 with that many false elements. Idempotent if already decompressed.
 function DecompressHilite(hilite) {
   var retval = [];
   for (var i = 0; i < hilite.length; ++i) {
     if (2 <= hilite[i]) {
-      for (var j = 0; j < hilite[i]; ++j) {retval.push(0);}
+      for (var j = 0; j < hilite[i]; ++j) {retval.push(false);}
     } else {
-      retval.push(hilite[i]);
+      retval.push(hilite[i] != 0);
     }
   }
+  CheckHilites("Decomp",  retval);
   return retval;
 }
 
@@ -3808,9 +4010,16 @@ console.log("BUG: CompressStringify called with a string");
   } else {
     inval = stateobj;
   }
-  inval.rowToHilite = CompressHilite(inval.rowToHilite);
+  // NOTE: if the argument is state2,state2.rowToHilite is MODIFIED here !
+  var temp = inval.rowToHilite;
+  var temp1 = CompressHilite(inval.rowToHilite);
+  var temp2 = DecompressHilite(temp);
+CheckSame(temp, temp2);
+
+  inval.rowToHilite = temp1;
   var retval = stringifyState(inval);
 //console.log("CompressStringify", retval);
+  inval.rowToHilite = temp;	// Restore original
   return retval;
 }
 
@@ -3824,7 +4033,7 @@ console.log("BUG: DecompressUnstringify called with a non-string");
     retval = stateobj;
   }
   retval.rowToHilite = DecompressHilite(retval.rowToHilite);
-//console.log("DecompressUnstringify", retval);
+  //console.log("DecompressUnstringify", retval);
   return retval;
 }
 
@@ -3836,7 +4045,9 @@ function packupState() {
 
 // After restoring state, put Sets and derived main state variables back
 function unpackState(savedstr) {
+//console.log("unpackState", savedstr);
   state2 = DecompressUnstringify(savedstr);
+  CheckHilites("Unpack", state2.rowToHilite);
   RecalcDerivedState();
 }
 
@@ -3851,6 +4062,7 @@ function resetzoom() {
     document.getElementById("debugtext").hidden = debug;
     debug = !debug;
     //presentation = !presentation;
+    return;
   }
 
   data.savedview[0][1] = packupState();
@@ -4051,7 +4263,8 @@ function annotatesearch2(needle, mindur, maxdur) {
   resetlines();
   document.getElementById("matchcount").innerHTML = "";
 
-  if (needle.search(/^(\d\d?:)?\d\d?\.[0-9]+(\+|\-)*$/) >= 0) {
+  // xx:xx.xxx+- or xxx.xxx+-
+  if (needle.search(/^(\d\d?:)?\d\d?\d?\.[0-9]+(\+|\-)*$/) >= 0) {
     SeekTime(needle); 
     return;
   }
@@ -4072,6 +4285,7 @@ function annotatesearch2(needle, mindur, maxdur) {
   state.annotated_d = [];
   state2.annotated_one_d = -1;
   state.hilite_evnum = 0;
+  state.hilite_evnum2 = 0;
 
   resetRotatingLabelk();
 
@@ -4543,6 +4757,19 @@ function draw_one_annot(d, vx, vy,  liney, linedy,  dotsy, dotsdy,  fulltext, an
   }
 }
 
+// Create complet text for d. Includes ipc/llc.
+function complete_text(d) {
+    var fulltext =  shortnum5(tsrel(d)) + " " + fullname(d, false) + "; " + 
+      shortnum(dur(d), data.thousandsX) + data.shortUnitsX;
+    if ((0 <= state2.ipc_value) && (is_executable(d))) {	// available and real execution span
+      if (ipc_really_llc) {
+        fulltext += " llc=" + llcvalues[ipc(d)];
+      } else {
+        fulltext += " ipc=" + ipcvalues[ipc(d)];
+      }
+    }
+    return fulltext;
+}
 
 // Inputs per rowheight:
 //  perTracksize[i].annotsize 	annotation font size
@@ -4616,7 +4843,11 @@ function annotatespan(d, clss, short, my, rotate) {
         fulltext = timetxt + " " + fulltext + "; " + 
           shortnum(dur(d), data.thousandsX) + data.shortUnitsX;
         if ((0 <= state2.ipc_value) && (is_executable(d))) {	// available and real execution span
-          fulltext += " ipc=" + ipcvalues[ipc(d)];
+          if (ipc_really_llc) {
+            fulltext += " llc=" + llcvalues[ipc(d)];
+          } else {
+            fulltext += " ipc=" + ipcvalues[ipc(d)];
+          }
         }
       }
     } 
@@ -4723,6 +4954,7 @@ function mousedown_x() {
 
     // Shift-RIGHT-click highights all same-event-number items, fades others
     if (0 < d3.event.button) {
+      state.hilite_evnum2 = state.hilite_evnum;
       state.hilite_evnum = ev(d1);
       resetText(document.getElementById("SearchText"), name(d1));
       // Draw all events onscreen, plus marks, plus IPC
@@ -4832,7 +5064,7 @@ function mouseup_x() {
 
     dragging_bubble = false;
     dragging_spike = false;
-    svgdotg.on("mousemove", null);
+    svgdotg.on("mousemove", mousemove_region3);
 
     // If shift key is still down, remove all rubberlines and clear annots
     if (d3.event.shiftKey) {
@@ -4841,10 +5073,67 @@ function mouseup_x() {
       state2.annotated_one_d = -1;
       if (state.hilite_evnum != 0) {
         state.hilite_evnum = 0;
+        state.hilite_evnum2 = 0;
         // Draw all events onscreen, plus marks, plus IPC
         redrawEvents();
       }
     }
+}
+
+// Display name of current item in lower left corner of region 3
+function delayed_mousemove_event(xpx, ypx) {
+  // Find nearest data object, use hilo
+  var i = FindNearestEvent(xpx, ypx, true); 
+//console.log("mousemove", xpx, ypx, i);
+  if (i < 0) {return;}
+  var d = data.events[i];
+  var dtext = complete_text(d);
+//console.log(dtext);
+
+  var xmid = 10;
+  var ymid = region234height - 10;
+  var aheight = 18;
+  var textwidth = Rnd1((dtext.length + 1) * aheight * 0.5);
+  d3.selectAll(".movetext").remove();
+
+  // Put something behind the string
+  innersvgdotg.append("rect")
+    .attr("class", "movetext noselect ")    
+    .attr("x", (xmid - 2) + "px")       
+    .attr("y", (ymid - (aheight - 2)) + "px")       
+    .attr("width", textwidth + "px")
+    .attr("height", (aheight - 2) + "px")
+    .attr("style", "fill:rgb(255,255,255); opacity:0.875"); 
+
+  // Show the string
+  innersvgdotg.append("text")	// Placeholder objects
+    .attr("class", "movetext noselect ")
+    .attr("transform", "translate(" + (xmid) + "," + (ymid) + ")scale(1,1)")
+    .attr("font-size", aheight + "px")
+    .attr("font-family", "sans-serif")
+    .text(dtext);
+}
+
+// Fires continuously with mouse movement in region 3
+// If over a timespan, display it
+function mousemove_region3() {
+  d3.event.stopPropagation();
+  var m = d3.mouse(this);
+  var xpx = m[0];		// Remember so we can check for tiny movement in mousemove
+  var ypx = m[1];		// Remember so we can check for tiny movement in mousemove
+  if (xpx < 0) return;
+  if (region3width < xpx) return;
+  if (ypx < 0) return;
+  if (region234height < ypx) return;
+
+  var deltamx = Math.abs(mx1 - xpx);
+  var deltamy = Math.abs(my1 - ypx);
+  if ((deltamx < 5) && (deltamy < 5)) {return;}	// Move at least 5 px
+
+  mx1 = xpx;
+  my1 = ypx;
+  clearTimeout(timerHandle);
+  timerHandle = setTimeout(delayed_mousemove_event, 50, xpx, ypx);  // msec
 }
 
 // Set event dst_d to be at the time and cpu/pid/rpc of src_d.
@@ -4900,7 +5189,7 @@ function mouseup_callout() {
 //console.log("mouseup_callout");
   dragging_bubble = false;
   dragging_spike = false;
-  svgdotg.on("mousemove", null);
+  svgdotg.on("mousemove", mousemove_region3);
 }
 
 
@@ -5089,7 +5378,8 @@ function mousedown_y(m) {
   // Backmap and turn on highlights here
   var hilite_row = doSnap_y(m[1]);
 //console.log("  hilite_row", hilite_row, sortName[hilite_row], state2.rowToHilite[hilite_row]);
-  var newhilite = state2.rowToHilite[hilite_row] ^ 1;
+  var newhilite = !state2.rowToHilite[hilite_row];
+  //if ((newhilite < 0) || (1 < newhilite)) {newhilite = 0;}	// Make robust
   
   // Shift-click highlights one row
   // Shift-RIGHT-click highlights all rows with matching name prefix
@@ -5097,7 +5387,8 @@ function mousedown_y(m) {
      state2.rowToHilite[hilite_row] = newhilite;
   } else {
     var matchlen = sortName[hilite_row].length;	// Exact match
-    var prefixlen = sortName[hilite_row].search("[^a-zA-Z0-9_-]");
+    //var prefixlen = sortName[hilite_row].search("[^a-zA-Z0-9_-]");
+    var prefixlen = sortName[hilite_row].search("[^a-zA-Z_-]");	// Stop at digits
     if (0 < prefixlen) {matchlen = prefixlen;}
     var prefix = sortName[hilite_row].substr(0, matchlen);
     // Update all matching rows
@@ -5107,6 +5398,8 @@ function mousedown_y(m) {
       }
     }
   }
+  CheckHilites("Click", state2.rowToHilite);
+
   
   // Now highlight all the events in currently-highlighted rows
   RecalcEventHilites();		// from rowToHilite
@@ -5747,6 +6040,7 @@ function redrawEvents() {
   if (state.hilite_evnum != 0) {
     ShowMatchcount();
   }
+  svgdotg.on("mousemove", mousemove_region3);
 }
 
 
@@ -5820,7 +6114,7 @@ function delayed_redraw_events_axes() {
 
 function redraw_events_axes() {
   clearTimeout(timerHandle);
-  timerHandle = setTimeout(delayed_redraw_events_axes, 50);
+  timerHandle = setTimeout(delayed_redraw_events_axes, 50);  // msec
 }
 
  
@@ -6000,6 +6294,7 @@ function allocOuterSvg() {
     .on("dblclick", mouse_dblclick)
     .on("mousedown", mousedown_x)
     .on("mouseup", mouseup_x)
+    .on("mousemove", mousemove_region3)
     .attr("class", "svgdotg")
     .attr("transform", "translate(" + region2width + "," + region1height + ")");
 
@@ -6224,6 +6519,10 @@ function redrawUI() {
     if (state.just_reset) {
       document.getElementById("matchcount").innerHTML = 
         data.kernelVersion + ", " + data.cpuModelName;
+      if (is_riscv) {
+          document.getElementById("debugout").innerHTML = 
+        "<span style=\"font-weight:bold; color:red\">LOW-RESOLUTION TIMER</span>";
+      }
     } else {
       document.getElementById("matchcount").innerHTML = "";
     }
@@ -6330,7 +6629,14 @@ function doToggleLock(e) {
   redrawEvents();
 }
 
+// If shift-click, toggle hack_value instead
 function doToggleCb(e) {
+  if (e.shiftKey) {
+    state2.hack_value = doToggle(e.shiftKey, state2.hack_value, hack_value_max);
+    redrawUI();
+    redrawEvents();
+    return;
+  }
   state2.cb_value = doToggle(e.shiftKey, state2.cb_value, cb_value_max);
   currentcolor = (state2.cb_value == 0) ? normalcolor : colorblindcolor;
   redrawUI();
@@ -7170,7 +7476,7 @@ function getDataMetadata(data) {
 //console.log("X: ", realxleft, "..", realxright);
 
   // Initialize rowToHighlighted
-  state2.rowToHilite = new Array(sortNum.length).fill(0);
+  state2.rowToHilite = new Array(sortNum.length).fill(false);
 
   // Now fill in rowToHeight  and rowToTrack 
   rowToHeight = new Array(sortNum.length).fill(10);
@@ -7280,6 +7586,14 @@ function newdata2(data2) {
   // Grab the IPC flag; ipc_value=-1 means no IPC data available
   state2.ipc_value = 0;
   if ((data.flags & 128) == 0) {state2.ipc_value = -1;}
+  ipc_really_llc = false;
+  // LLC misses hack
+  if ((data.flags & 32) != 0) {
+    ipc_really_llc = true; 
+    state2.ipc_value = 0;
+    document.getElementById("showipc").textContent = "LLC";
+console.log("ipc_really_llc = true");
+  }
   
     // Remember if this is from a high-overhead RISC-V CPU
   is_riscv = false;
@@ -7432,6 +7746,7 @@ function maintainSearchList(keycode) {
         //b.setAttribute("value", i.toString());
         //b.setAttribute("style", "background-color:#EEEEFF; width:100%;");
         b.setAttribute("style", "background:#EEEEFF; width:100%;");
+        b.setAttribute("style", "font-family:sans-serif;");
         b.addEventListener("click", searchlistClick);
 //console.log("append2", box, a);
         ssl.appendChild(b);
@@ -8470,51 +8785,6 @@ function unloadSaveState() {
 <!-- All the drawing is done in an SVG element allocated inside here -->
 <span id="anchorsvg"></span>
 
-<br>
-
-<!-- Secondary menu, normally invisible. Toggle on/off wiith ctrl-click reddot -->
-<span id="debugtext" hidden>
-&nbsp;&nbsp;&nbsp;
-Aspect
-<input name="ShowAspect" type="text" maxlength="20" id="ShowAspect" class="ShowAspect"
-  onkeyup="keyupAspect(event)" value="0:0" style="width: 30px; background-color:#FFFFFF; text-align:center"/> 
-Ychars
-<input name="DebugRegion2Chars" type="text" maxlength="10" id="DebugRegion2Chars" class="DebugRegion2Chars" 
-  onkeyup="keyupDebugRegion2Chars(event)" style="width: 20px; background-color:#FFFFFF"/> 
-Ypx
-<input name="DebugRegion2Px" type="text" maxlength="10" id="DebugRegion2Px" class="DebugRegion2Px" 
-  onkeyup="keyupDebugRegion2Px(event)" style="width: 20px; background-color:#FFFFFF"/> 
-<!--
-rows
-<input name="DebugRows" type="text" maxlength="10" id="DebugRows" class="DebugRows"   
-  onkeyup="keyupDebugRows(event)" style="width: 20px; background-color:#FFFFFF"/> 
--->
-txt
-<input name="DebugTxt" type="text" maxlength="10" id="DebugTxt" class="DebugTxt" 
-  onkeyup="keyupDebugTxt(event)" style="width: 20px; background-color:#FFFFFF"/> 
-spn
-<input name="DebugSpn" type="text" maxlength="10" id="DebugSpn" class="DebugSps"   
-  onkeyup="keyupDebugSpn(event)" style="width: 20px; background-color:#FFFFFF"/> 
-
-
-&nbsp;
-<button id="legend"  style="border-radius:6px";>Legend</button>
-<button id="fade"  style="border-radius:6px";>Fade</button>
-<button id="callout"  style="border-radius:6px; font-weight: bold; background-color: white; color: black; border-color: rgb(192,192,192); ">&#x1f5e8;</button>
-<button id="export"  style="border-radius:6px";>Export</button>
-&nbsp;&nbsp;&nbsp;
-x:
-<span id="xstartwidth" style="font-family: sans-serif; font-size: 10pt"></span>
-&nbsp;
-y:
-<span id="ystartwidth" style="font-family: sans-serif; font-size: 10pt"></span>
-&nbsp;
-<span id="showversion" style="font-family: sans-serif; font-size: 10pt"></span>
-
-
-<br>
-</span>
-<!-- End Secondary menu -->
 
 <!--  
   // Six save/restore clickable items 
@@ -8613,6 +8883,50 @@ International Morse Code (for wait events)
   </span>
 
 </span>
+
+<br>
+
+<!-- Secondary menu, normally invisible. Toggle on/off wiith ctrl-click reddot -->
+<span id="debugtext" hidden>
+&nbsp;&nbsp;&nbsp;
+Aspect
+<input name="ShowAspect" type="text" maxlength="20" id="ShowAspect" class="ShowAspect"
+  onkeyup="keyupAspect(event)" value="0:0" style="width: 30px; background-color:#FFFFFF; text-align:center"/> 
+Ychars
+<input name="DebugRegion2Chars" type="text" maxlength="10" id="DebugRegion2Chars" class="DebugRegion2Chars" 
+  onkeyup="keyupDebugRegion2Chars(event)" style="width: 20px; background-color:#FFFFFF"/> 
+Ypx
+<input name="DebugRegion2Px" type="text" maxlength="10" id="DebugRegion2Px" class="DebugRegion2Px" 
+  onkeyup="keyupDebugRegion2Px(event)" style="width: 20px; background-color:#FFFFFF"/> 
+<!--
+rows
+<input name="DebugRows" type="text" maxlength="10" id="DebugRows" class="DebugRows"   
+  onkeyup="keyupDebugRows(event)" style="width: 20px; background-color:#FFFFFF"/> 
+-->
+txt
+<input name="DebugTxt" type="text" maxlength="10" id="DebugTxt" class="DebugTxt" 
+  onkeyup="keyupDebugTxt(event)" style="width: 20px; background-color:#FFFFFF"/> 
+spn
+<input name="DebugSpn" type="text" maxlength="10" id="DebugSpn" class="DebugSps"   
+  onkeyup="keyupDebugSpn(event)" style="width: 20px; background-color:#FFFFFF"/> 
+
+&nbsp;
+<button id="legend"  style="border-radius:6px";>Legend</button>
+<button id="fade"  style="border-radius:6px";>Fade</button>
+<button id="callout"  style="border-radius:6px; font-weight: bold; background-color: white; color: black; border-color: rgb(192,192,192); ">&#x1f5e8;</button>
+<button id="export"  style="border-radius:6px";>Export</button>
+&nbsp;&nbsp;&nbsp;
+x:
+<span id="xstartwidth" style="font-family: sans-serif; font-size: 10pt"></span>
+&nbsp;
+y:
+<span id="ystartwidth" style="font-family: sans-serif; font-size: 10pt"></span>
+&nbsp;
+<span id="showversion" style="font-family: sans-serif; font-size: 10pt"></span>
+
+<br>
+</span>
+<!-- End Secondary menu -->
 
  
 </body> 
