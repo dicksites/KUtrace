@@ -1,0 +1,130 @@
+Installing KUtrace for Linux 6.6.36
+dsites 2024.07.15
+
+Download and unpack a copy of Linux 6.6.36 from kernel.org or one of its clones, 
+putting everything in a directory named linux-6.6.36 
+
+Install any tools needed for a kernel build. I follow the directions in 
+  https://davidaugustat.com/linux/how-to-compile-linux-kernel-on-ubuntu
+
+
+(1) Initial unpatched build, a version tailored to your specific machine
+$ cd linux-6.6.36
+$ cp -v /boot/config-$(uname -r) .config
+$ make localmodconfig
+
+$ scripts/config --disable SYSTEM_TRUSTED_KEYS
+$ scripts/config --disable SYSTEM_REVOCATION_KEYS
+$ scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+$ scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+
+$ fakeroot make -j4
+   The first time, this will take a while, perhaps 1/2 hour to five hours.
+$ sudo make modules_install
+$ sudo make install
+$ sudo reboot
+
+...
+
+Hold down shift key while booting to get to grub advanced choices, and pick off the 
+newly-built 6.6.36 kernel to load
+
+When it comes up and you log in, do
+$ uname -a
+
+to confirm that the kernel version and date are the just-built 6.6.36 version.
+
+If there are difficulties, stay with it (perhaps with help from someone) until you 
+have a successful unmodified 6.6.36 kernel running.
+
+
+(2) Initial patched build
+Apply the patch file via
+$ cd linux-6.6.36
+$ patch -p1 kutrace_patch_file_6.6.36.txt
+
+This changes about 24 files, installing new files include/linux/kutrace.h,
+kernel/kutrace/kutrace.c, and kernel/kutrace/Makefile. All the other changes are simple
+mostly-one-line hooks to record individual KUtrace events.
+
+$make menuconfig
+
+Find the KUtrace configuration choice inserted by the patched arch/x86/Kconfig and 
+turn it on.
+
+$ fakeroot make -j4
+   This will be much faster because it only recompiles the changed files.
+$ sudo make modules_install
+$ sudo make install
+$ sudo reboot
+   ... shift key for grub, login, uname to confirm
+   
+
+(3) The loadable module
+From the github KUtrace code, download the linux/module and postproc subdirectories
+$ cd linux/module
+$ make
+
+This produces kutrace_mod.ko, which has to be recompiled each time you modify the kernel
+because it links against exported symbols there, including the exported KUtrace
+variables.
+
+$ sudo insmod kutrace_mod.ko tracemb=20 check=0
+
+This installs the loadable module, which has all the implementation code for the hooks
+patched into various kernel source files above. It also has the implementation code
+for user-supplied control calls via the kutrace_control program or the lower-level 
+kutrace_lib code linked into some program.
+
+tracemb specifies the size in megabytes of the reserved trace buffer.
+check   specifies whether to require the PTRACE privilege in a task that does
+        user-supplied calls. 0 means don't check.
+
+(The command $ sudo rmmod kutrace_mod.ko removes the module)
+   
+
+(4) The control and postprocessing code
+From the github KUtrace code,
+$ cd postproc
+$ ./build.sh
+
+This compiles the postprocessing programs.
+
+
+(5) Make a trace
+From the github KUtrace code,
+$ cd postproc
+$ ./kutrace_control
+
+At the prompt, type "goipc<cr>"
+and at the next prompt, type "stop<cr>"
+
+go       starts a trace
+goipc    starts a trace that also includes instructions-per-cycle for each timespan
+gollc    starts a trace that also includes last-level cache misses for each timespan
+goipcllc does both (ipc and llc are in alphabetic order here)
+stop     stops a trace and writes the raw trace binary to a disk file
+
+This will write a raw trace file with a name like
+  ku_20240709_152922_dclab-2_11686.trace
+  
+$ ./postproc3.sh ku_20240709_152922_dclab-2_11686.trace "Caption here"
+
+This will produce 
+  ku_20240709_152922_dclab-2_11686.json and
+  ku_20240709_152922_dclab-2_11686.html
+  
+and try to open the HTML in the Google Chrome browser (if you want a different browser, 
+change the script to use it instead). If all goes well, your browser will display the
+the full trace timeline, with rows for multiple CPU cores. It will mostly be idle job 
+loop and timer interrupts, but you can pan (click-drag) and zoom (mouse wheel)
+around to see what is there. See the github KUtrace files
+  hello_world_demo_live.html and
+  hello_world_walkthrough.pdf
+for some guidance on what to look for.
+  
+
+(6) Go celebrate
+
+
+

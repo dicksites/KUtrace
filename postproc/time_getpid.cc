@@ -53,7 +53,9 @@
 #include <stdio.h>
 #include <sys/time.h>	// gettimeofday
 #include "basetypes.h"
+
 #include "kutrace_lib.h"
+#include "timecounters.h"
 
 // On ARM-32 /usr/include/arm-linux-gnueabihf/asm/unistd-common.h
 // On ARM-64 linux/arch/arm64/include/asm/unistd32.h
@@ -65,25 +67,16 @@
 #define __NR_getpid 20
 #elif defined(__x86_64__)
 #define __NR_getpid 39
-#elif defined(__riscv)
-#define __NR_getpid 172
 #else
 BUILD_BUG_ON_MSG(1, "Define NR_getpid for your architecture");
 #endif
 
 
-#if 1
-// Return current time of day as microseconds since January 1, 1970
-inline int64_t GetUsec() {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  return (tv.tv_sec * 1000000l) + tv.tv_usec;
-}
-#endif
+// Useful utility routines
+//int64 inline GetUsec() {struct timeval tv; gettimeofday(&tv, NULL);
+//                 return (tv.tv_sec * 1000000l) + tv.tv_usec;}
 
-
-// getpid doesn't actually have any arguments, 
-// but I want to compare time to two-arg gettimeofday
+// getpid doesn't actually have any arguments, but I want to compare time to two-arg gettimeofday
 inline int64 DoGP(struct timeval* arg1, void* arg2)
 {
 #if defined(__ARM_ARCH_ISA_ARM) && !defined(__aarch64__)
@@ -108,7 +101,6 @@ inline int64 DoGP(struct timeval* arg1, void* arg2)
 
 #endif
 
-// Possible faster version
 // #if defined(__x86_64__)
 //    asm volatile
 //    (
@@ -132,8 +124,7 @@ int main (int argc, const char** argv) {
     bogus += DoGP(&tv, NULL);
     bogus += DoGP(&tv, NULL);
   }
-  
-  // Now time 100K getpid calls
+
   int64 start_usec = GetUsec();
   for (int i = 0; i < 100000 / 4; ++ i) {
     struct timeval tv; 
@@ -148,7 +139,7 @@ int main (int argc, const char** argv) {
   if (stop_usec == 0) {printf("bogus %d\n", (int)bogus);}
 
 
-  // Now time 100K marker inserts
+  // Now time marker inserts
   int64 start_usec2 = GetUsec();
   for (int i = 0; i < 100000 / 4; ++ i) {
     kutrace::mark_a("hello");
@@ -159,7 +150,7 @@ int main (int argc, const char** argv) {
   int64 stop_usec2 = GetUsec();
 
 
-  // Print last to avoid printing messing up timing
+  // Print last to avoid printing extending timing
   int delta = stop_usec - start_usec;
   fprintf(stdout, "100000 calls to getpid() took %d us (%d ns each)\n", delta, delta / 100);
   fprintf(stdout, "  Note that each call generates TWO KUtrace events\n");

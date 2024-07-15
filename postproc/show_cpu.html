@@ -1,13 +1,15 @@
 <!DOCTYPE html>
 <html>
 <meta charset="UTF-8">
-<!-- Copyright 2023 Richard L. Sites -->
+<!-- Copyright 2024 Richard L. Sites -->
 <!-- Add slanted overlay -->
 <!-- Add LLC misses support -->
 <!--   NOTE: Be sure to update script_edit_date -->
 <!-- 2023.07.26 Add live mouse event tracking --> 
-<!-- 2023.07.31 Shift-rightclick Y-axis labels for highlight ignores numbers now --> 
-<!-- 2023.07.31 Mark button does abcd, ac, bd, none now --> 
+<!-- 2023.07.31 Shift-righclick Y-axis labels for highlight ignores numbers now --> 
+<!-- 2024.05.29 Add mixed ipc/llc support --> 
+<!-- 2024.06.04 Have mouseover display always show full data --> 
+<!-- 2024.07.03 Add IPI amd monitor/mwait arcs --> 
 
 <head>
  
@@ -384,8 +386,8 @@
 // Global constants                                                           //
 //----------------------------------------------------------------------------//
 
-// Version control for this file
-var script_edit_date = "(ver2023-07-31)";  // Shown in secondary menu for identification
+// Version control for this HTML file
+var script_edit_date = "(ver2024-07-14)";  // Shown in secondary menu for identification
 
 var book = false;		// Set true to get defaults for creating book diagrams
 
@@ -408,7 +410,7 @@ var xpixelfraction = 1.0;  	// What fraction of a pixel width to do full draw
 const kNetworkMbPerSec = 1000;	// Default: 1 Gb/s
 
 
-// Little usage hints to display
+// Little usage hints to display 
 const kUsageText = "Scroll wheel to zoom. Click-drag to pan. " + 
   "Shift-click-unclick to annotate. " + 
   "Shift-click-unshift to annotate and keep. " + 
@@ -430,6 +432,7 @@ const kDummyData = {
               [999.0, 0, 0, 0, 0, 0, 0, 0, 0, "x"]]
 };
 
+const ipibase =     -7;
 const dotsbase =    -6;
 const annotbase =   -5;
 const calloutbase = -4;
@@ -438,6 +441,7 @@ const ovalbase =    -2;
 const bracketbase = -1;
 const msgrxbase =   0x00204;	// Complete messages
 const msgtxbase =   0x00205;
+const send_ipi =    0x00207;
 const freqbase =    0x00209;
 const markbase =    0x0020A;
 const pktrxbase =   0x00214;	// Individual packets seen by kernel tcp/udp
@@ -445,6 +449,7 @@ const pkttxbase =   0x00215;
 const userrxbase =  0x00216;	// Individual packets seen by user code
 const usertxbase =  0x00217;
 const queued =      0x0021A;	// RPC queued
+const mon_store =   0x0021E;	// Monitor_store or ipi wakeup
 const lockbase =    0x00282;
 const pcbase =      0x00280;	// PC samp 280=u, 281=k
 const waitbase =    0x00300;
@@ -463,6 +468,9 @@ const CR = 13;			// Ascii carriage-return
 const searchlistMax = 20;
 const searchlistMaxDisplay = 7;
 
+const NSEC10 = 0.000000010;	// 10 nanoseconds
+
+
 
 // Pixel-banging in layout
 const min_txt_px = 12;		// Minimum font size px for annotation text lines
@@ -478,10 +486,18 @@ const rpcfontsize = 12;		// Font size px for RPC message numbers
 // This very roughly approximates overlapped multiple outstanding misses.
 // The table here maps bucket number 0..15 to nanoseconds of memory activity.
 // These values are extremely rough and only given to two digits.
+//const kLlcNsec = [
+//  0, 100, 450, 820,             1500, 2700, 5000, 9000, 
+//  16000, 30000, 54000, 98000,   180000, 320000, 590000, 1100000
+//ss];
+
+// The above seem too large (exceeding actual duration too often).
+// Made them ~40% smaller above 16 misses 2024.04.01
 const kLlcNsec = [
-  0, 100, 450, 820,             1500, 2700, 5000, 9000, 
-  16000, 30000, 54000, 98000,   180000, 320000, 590000, 1100000
+  0, 100, 400, 700,             900, 1600, 3000, 5400, 
+  9600, 18000, 32000, 59000,   110000, 190000, 350000, 660000
 ];
+
 
 
 //----------------------------------------------------------------------------//
@@ -717,7 +733,9 @@ var debug = false;		// show debugging options
 
 var timerHandle;		// For fewer redraws of events (faster with big pan/zoom)
 
-var ipc_really_llc = false;	// Reset on data load if 4-bit IPC field is really LLC misses
+var has_ipc = false;
+var has_llc = false;
+var has_both = false;	
 
 const prefixCpu = 0;
 const prefixPid = 1;
@@ -759,7 +777,7 @@ const freq_value_max = 2;		// 0: none, 1:bold, 2: show CPU frequency
 const ovhd_value_max = 1;		// 0: none, 1: show overhead time
 const lock_value_max = 2;		// 0: none, 1: bold, 2: show lock-held lines 
 const cb_value_max = 1;			// 0: normal colors, 1: color-blind colors
-const samp_value_max = 1;		// 0: none, 1: show PC samples
+const samp_value_max = 2;		// 0: none, 1: show idle PC samples, 2: show PC samples
 const searchnot_value_max = 1;		// 0: normal, 1: invert match         
 const textmultiplier_value_max = 3;	// 0: normal, 1: 0.75x, 2: 1.5x, 3: 1.25x
 const basetime0_value_max = 1;		// 0: normal, 1: relative to row start, /* 2: summary_h, 3: summary_v */
@@ -810,7 +828,7 @@ const ipcvalues = ["0", "1/8", "1/4", "3/8",  "1/2", "5/8", "3/4", "7/8",
 //const llcvalues = ["0", "64B", "128", "256",  "512", "1KB", "2KB", "4KB", 
 //                   "8KB", "16K", "32K", "64K",  "128K", "256K", "512K", "1M+"];
 // 2023.06.25 encoding
-const llcvalues = ["0", "64+", "512", "1KB",       "2KB", "4KB", "8KB", "16K", 
+const llcvalues = ["0", "64", "512", "1KB",       "2KB", "4KB", "8KB", "16K", 
                    "32K", "64K", "128K", "256K",   "512K", "1M", "2M", "4M+"];
 
 const ipc_color = ["#555555", "#0000FF", "#0000FF", "#AA0000"]; 
@@ -1095,6 +1113,7 @@ var state = {
   ////basetime0_value: 0,
 
   hilite_evnum : 0,		// Shift-RIGHT-click on an event highlights all of them
+  hilite_evnum2 : 0,		// previous highlight, so youcan have two at once onscreen
   just_reset: true,		// Controls initial display of kernel and CPU model
 
   // List of items that are annotated on screen
@@ -1448,11 +1467,12 @@ console.log("initializeState");
 
 ////  state.hilite_event_array = [];
   hilite_event_set.clear();
-  state2.rowToHilite.fill(0);
+  state2.rowToHilite.fill(false);
 
   state.annotated_d = [];
   state2.annotated_one_d = -1;
   state.hilite_evnum = 0;
+  state.hilite_evnum2 = 0;
 
   state2.minmax_units_value = 1;		// usec
   state.just_reset = true;
@@ -1534,6 +1554,16 @@ function name(d) {return d[9];}
 // placeholder for now
 function res(d) {return -1;}
 
+// Fetch IPC, from packed two-bit IPC&LLC if both
+// Top 2 bits are IPC: 0 4 8 12. Map into 1 5 9 13
+function realipc(d) {return has_both ? (ipc(d) & 0x0c) + 1 : ipc(d);}
+
+// Fetch LLC, from packed two-bit IPC&LLC if both
+//// Bottom twobits are LLC: 0 1 2 3. Map into 2 6 10 14
+// Bottom two bits are LLC: 0 1 2 3. Map into 0 2 5 8
+const kLlcSmall = [0,2,5,8];
+function realllc(d) {return has_both ? kLlcSmall[ipc(d) & 0x03] : ipc(d);}
+
 function tsend(d) {return d[0] + d[1];}
 function tsrelend(d) {return (d[0] - xaxisfmt.basetime) + d[1];}
 
@@ -1602,6 +1632,7 @@ function is_ovhd(d) {return ev(d) == ovhdbase;}    	// overloads sysret32 511
 function is_bracket(d) {return ev(d) == -1;}
 function is_oval(d) {return ev(d) == -2;}
 function is_arc(d) {return ev(d) == -3;}
+function is_ipi(d) {return ev(d) == -7;}
 function is_callout(d) {return ev(d) == -4;}
 function is_annot(d) {return ev(d) == annotbase;}
 function is_dots(d) {return ev(d) == dotsbase;}
@@ -1640,6 +1671,7 @@ function is_bottom_half_ev(ev)  {return ev == 0x5FF;}
 function is_bracket_ev(ev) {return ev == -1;}
 function is_oval_ev(ev) {return ev == -2;}
 function is_arc_ev(ev) {return ev == -3;}
+function is_ipi_ev(ev) {return ev == -7;}
 function is_callout_ev(ev) {return ev == -4;}
 function is_overlay_ev(ev) {return (ev < 0) && !is_arc_ev(ev);}
 function is_any_overlay_ev(ev) {return (ev < 0);}
@@ -1923,6 +1955,9 @@ function Rnd5(x) {return Math.round(x * 2) / 2;}
 // Round to one decimal place
 function Rnd1(x) {return Math.round(x * 10) / 10;}
 
+// Round to two decimal places
+function Rnd2d(x) {return Math.round(x * 100) / 100;}
+
 // Round to multiple of 10
 function Rnd10(x) {return Math.round(x / 10) * 10;}
 
@@ -1964,19 +1999,24 @@ function Base40ToChar(base40) {
 }
 
 
+// Draw an IPC or LLC triangle
+// Used for timespans, but also for drawing legends
+// If ipcd is >=0, draw as IPC, else draw as LLC of ipcd+16
 function draw_ipcmark(dotg, centerx, centery, size, ipcd, legend) {
+  var ipcllcd = ipcd;
+  if (ipcd < 0) {ipcllcd += 16;} 
   var xx = -size;
   var yy = size / 5;
   var offset = size * 3 / 4;
   var strokewidth = Rnd1(size / 20);
-  var rad = Math.PI - ((ipcd * Math.PI) / 16);
+  var rad = Math.PI - ((ipcllcd * Math.PI) / 16);	// Speedometer angle
   var sinangle = Math.sin(rad);
   var cosangle = Math.cos(rad);
   var path;
   // Offset and Rotate the center
   centerx2 = centerx + (offset * cosangle);
   centery2 = centery + (offset * -sinangle);
-  if ((ipcd & 1) == 0) {
+  if ((ipcllcd & 1) == 0) {
     // draw plain triangle
     path = "M" + (centerx2) + "," + (centery2) + 
                " L" + (centerx2 + (xx * cosangle) + (yy * -sinangle)) + "," +
@@ -1997,28 +2037,38 @@ function draw_ipcmark(dotg, centerx, centery, size, ipcd, legend) {
   dotg.append("path")
     .attr("class", legend ? "ipcmarkl" :"ipcmark")
     .attr("d",  path)
-    .attr("fill", ipc_really_llc ? "#FFC080" : "#FFFFFF")	// white (orangle llc)
+    .attr("fill", (ipcd < 0) ? "#FFC080" : "#FFFFFF")	// white (orangle llc)
     .attr("stroke-width", strokewidth)	
-    .attr("stroke", ipc_color[ipcd >> 2]);	// gray/blue/red
+    .attr("stroke", ipc_color[ipcllcd >> 2]);	// gray/blue/red
+}
+
+// Rough duration of memory activity  (seconds)
+function memdur(ipcd) {
+   return kLlcNsec[ipcd] / 1000000000.0;
 }
 
 // Draw a line centered at centerx roughly indicating memory-bus busy
-function draw_llcmark(dotg, centerx, centery, size, d, legend) {
-  var ipcd = ipc(d);
-  if (ipcd == 0) {return;}
+// Note that 5th arg is event d, not just its 4-bit IPC/LLC value
+function draw_llcmarks(dotg, centerx, centery, size, d, legend) {
+  var ipcd = realllc(d);
 
+  // Draw line underneath the timespan
   // Rough second duration of memory activity, but <= the timespan duration - 60ns
-  var duration = kLlcNsec[ipcd] / 1000000000.0;
+  var duration = memdur(ipcd);
   var toobig = false;
   if (dur(d) < duration) {
     duration = dur(d) - 0.000000060;
     toobig = true;
   }
+
+  // Put in small speedometer triangle. ipcd-16 marks as LLC colors, not IPC
+  draw_ipcmark(dotg, centerx, centery, size * 0.75, ipcd-16, legend);
+
   // seconds duration to pixels
   var llcpx = Rnd5(duration / xsecperpix);
   if (llcpx < 2) {return;}
-
-  var offset = size * 0.833;
+  
+  var offset = size * 0.833;	// Draw line at 5/6 of row size below centerline 
   var strokewidth = Rnd1(size / 20);
   path = "M" + (centerx - llcpx/2) + "," + (centery + offset) + " h" + (llcpx);
   dotg.append("path")
@@ -2027,8 +2077,6 @@ function draw_llcmark(dotg, centerx, centery, size, d, legend) {
     .attr("stroke-width", strokewidth)	
     .attr("stroke", toobig ? "#FF0080" : "#FF8000");	// orange (red if too big)
       
-  // Put in small speedometer arrow
-   draw_ipcmark(dotg, centerx, centery, size * 0.75, ipc(d), legend);
 }
 
 
@@ -2045,7 +2093,7 @@ function draw_emptylegend(lx, ly, lheight, lwidth) {
 }
 
 
-function draw_ipclegend(lx, ly, lheight, lwidth) {
+function draw_ipcllclegend(lx, ly, lheight, lwidth) {
   d3.selectAll(".ipclegend").remove();
   svgdotg.append("rect")
     .attr("class", "ipclegend")
@@ -2062,6 +2110,73 @@ function draw_ipclegend(lx, ly, lheight, lwidth) {
   ////var txtmul = textmultiplier_tbl[state.textmultiplier_value];
   var txtmul = 1.0;
 
+  // Draw combined IPC and LLC legend
+  // When combined, there are just 2 bits for IPC and two for LLC, packed into 4 bits
+  if (has_both) {
+    svgdotg.append("text")
+      .attr("class", "ipclegend")
+      .attr("transform", "translate(" + (centerx + 8) + "," + 
+                                        (centery + 2) + ")scale(1,1)")
+      .attr("font-size", textsize.smalltick + "px")
+      .attr("fill", "black")
+      .attr("font-family", "sans-serif")
+      .style("text-anchor", "left")
+      .text("IPC");
+
+    // Only draw four IPC labels: 1, 5, 9, 13
+    for (var i = 0; i < 4; ++i) {
+      var fulli = i*4 + 1;
+      var centerx_i = centerx + ipctextoffset[i >> 2] + 10;
+      var centery_i = centery + (i + (i >> 2) + 1) * lheight / 20;
+      draw_ipcmark(svgdotg, centerx, centery_i, 20 * txtmul, fulli, true);
+
+      svgdotg.append("text")
+        .attr("class", "ipclegend")
+        .attr("transform", "translate(" + (centerx_i) + "," + 
+                                      (centery_i + 2) + ")scale(1,1)")
+        .attr("font-size", textsize.smalltick + "px")
+        .attr("fill", "black")
+        .attr("font-family", "sans-serif")
+        .style("text-anchor", "left")
+        .text(ipcvalues[fulli]);
+    }
+
+    //// Now draw four LLC labels: 2, 6, 10, 14
+    // Now draw four LLC labels: 0, 1, 3, 7
+    var lowery =  centery + (4 + (4 >> 2) + 1) * lheight / 20;
+    svgdotg.append("text")
+      .attr("class", "ipclegend")
+      .attr("transform", "translate(" + (centerx + 8) + "," + 
+                                        (lowery + 2) + ")scale(1,1)")
+      .attr("font-size", textsize.smalltick + "px")
+      .attr("fill", "black")
+      .attr("font-family", "sans-serif")
+      .style("text-anchor", "left")
+      .text("Miss");
+
+    for (var i = 0; i < 4; ++i) {
+      var fulli = kLlcSmall[i];
+      var centerx_i = centerx + ipctextoffset[i >> 2] + 10;
+      var centery_i = lowery + (i + (i >> 2) + 1) * lheight / 20;
+      draw_ipcmark(svgdotg, centerx, centery_i, 20 * txtmul, fulli-16, true);
+
+      svgdotg.append("text")
+        .attr("class", "ipclegend")
+        .attr("transform", "translate(" + (centerx_i) + "," + 
+                                      (centery_i + 2) + ")scale(1,1)")
+        .attr("font-size", textsize.smalltick + "px")
+        .attr("fill", "black")
+        .attr("font-family", "sans-serif")
+        .style("text-anchor", "left")
+        .text(llcvalues[fulli]);
+    }
+
+
+  return;
+  }
+
+  // Draw either IPC or LLC legend
+  var doing_llc = has_llc & !has_ipc;
   svgdotg.append("text")
     .attr("class", "ipclegend")
     .attr("transform", "translate(" + (centerx + 8) + "," + 
@@ -2070,14 +2185,14 @@ function draw_ipclegend(lx, ly, lheight, lwidth) {
     .attr("fill", "black")
     .attr("font-family", "sans-serif")
     .style("text-anchor", "left")
-    .text(ipc_really_llc ? "Miss" : "IPC");
+    .text(doing_llc ? "Miss" : "IPC");
 
   var iincr = (txtmul >= 1.5) ? 2 : 1;
 
   for (var i = 0; i < 16; i += iincr) {
     var centerx_i = centerx + ipctextoffset[i >> 2] + 10;
     var centery_i = centery + (i + (i >> 2) + 1) * lheight / 20;
-    draw_ipcmark(svgdotg, centerx, centery_i, 20 * txtmul, i, true);
+    draw_ipcmark(svgdotg, centerx, centery_i, 20 * txtmul, doing_llc ? i-16 : i, true);
 
     svgdotg.append("text")
       .attr("class", "ipclegend")
@@ -2087,7 +2202,7 @@ function draw_ipclegend(lx, ly, lheight, lwidth) {
       .attr("fill", "black")
       .attr("font-family", "sans-serif")
       .style("text-anchor", "left")
-      .text(ipc_really_llc ? llcvalues[i] : ipcvalues[i]);
+      .text(doing_llc ? llcvalues[i] : ipcvalues[i]);
   }
 }
 
@@ -2222,6 +2337,7 @@ function draw_annotateall() {
   state.annotated_d = [];
   state2.annotated_one_d = -1;
   state.hilite_evnum = 0;
+  state.hilite_evnum2 = 0;
 
   dont_annotate = [];
   dont_annotate[0x10000] = true;	// Never label -idle- event
@@ -2235,7 +2351,7 @@ function draw_annotateall() {
     var d = data.events[i];
     var gray = !eventHilite(i);
     var skip = gray || dont_annotate[ev(d)] || is_mark(d) || is_pc_samp(d) || 
-      is_pstate(d) || is_arc(d) || is_callout(d) || is_rpcpkt(d) || 
+      is_pstate(d) || is_arc(d) || is_ipi(d) || is_callout(d) || is_rpcpkt(d) || 
       !strictly_startsonscreen_x(d) || !onscreen_all_y(d);
     if (skip) {continue;}
     // PC samples use right end, not left
@@ -2287,23 +2403,30 @@ function draw_annotateuser() {
   }
 }
 
-function draw_one_ipc(d, x0, y0, e_height) {
+function draw_one_ipcllc(d, x0, y0, e_height) {
   var do_kernel = (state2.ipc_value & 2) != 0;
   var do_user   = (state2.ipc_value & 1) != 0;
   // Since IPC for idle is always 0, omit it to avoid clutter
   if ((do_kernel && is_kernel(d)) || (do_user && is_user(d))) {
     var centerx = x0;
     var centery = y0;
-    var ipcd = ipc(d);
-    if(ipc_really_llc) {
-      draw_llcmark(innersvgdotg, centerx, centery, e_height, d, false);
-    } else {
-      draw_ipcmark(innersvgdotg, centerx, centery, e_height, ipcd, false);
-    }
+    if (has_ipc) {draw_ipcmark(innersvgdotg, centerx, centery, e_height, realipc(d), false);}
+    if (has_llc) {draw_llcmarks(innersvgdotg, centerx, centery, e_height, d, false);}
   }
 }
 
+// Cycyle through drawing mark_a/c and/or mark_b/d
 function draw_one_mark(row, d, x0, y0) {
+  var draw_bd = (state2.marks_value & 1) != 0;
+  var draw_ac = (state2.marks_value & 2) != 0;
+  var is_ac = (ev(d) == 0x20A) || (ev(d) == 0x20C);
+  var is_bd = (ev(d) == 0x20B) || (ev(d) == 0x20D);
+  if ((is_ac && draw_ac) || (is_bd && draw_bd)) {
+    draw_mark(row, d, x0, y0);
+  }
+}
+
+function draw_one_mark_old(row, d, x0, y0) {
   var draw_numeric = (state2.marks_value & 1) != 0;
   var draw_text = (state2.marks_value & 2) != 0;
   if ((draw_text && ev(d) != 0x20D) || (draw_numeric && ev(d) == 0x20D)) {
@@ -2469,10 +2592,8 @@ function xyrotate(xypair, sincospair) {
   return xyresult;
 }
  
-// Draw wakeup arc from x0 y0 to x1 y1
-function draw_arc(d, x0, y0, x1, y1) {
-  if (state2.arcs_value == 0) {return;}
-
+// Set up arc path without drawing it yet
+function make_arc_path(x0, y0, x1, y1) {
   var left_x = x0;
   var right_x = x1;
 
@@ -2483,7 +2604,7 @@ function draw_arc(d, x0, y0, x1, y1) {
   var bold = (state2.arcs_value == 1);
   var short_span = ((right_x - left_x) < (region3width * arcfraction));
   var long_window = (xdomainwidth > 0.005);
-  if (short_span && long_window && !force_annot && !bold && (state2.hack_value == 0)) {return;}
+  if (short_span && long_window && !force_annot && !bold && (state2.hack_value == 0)) {return "";}
 
   var left_y = y0;
   var right_y = y1;
@@ -2513,14 +2634,46 @@ function draw_arc(d, x0, y0, x1, y1) {
                      Rnd1(mid_y + ctl_rot.y) + "," +
                      Rnd1(right_x) + "," + Rnd1(right_y) + 
                  " l" + Rnd1(arrow_rot.x) + "," + Rnd1(arrow_rot.y);
+  return arc_path;
+}
+
+// Draw wakeup arc from x0 y0 to x1 y1
+function draw_arc_wake(x0, y0, x1, y1) {
+  if (state2.arcs_value == 0) {return;}
+
+  var arcpath = make_arc_path(x0, y0, x1, y1);
+  if (arcpath == "") {return;}
+  
+  var bold = (state2.arcs_value == 1);
   innersvgdotg.append("path")
     .attr("class", "graphlinex")
-    .attr("d", arc_path)
+    .attr("d", arcpath)
     .attr("fill", "none")
     .attr("stroke-width", bold ? 3.0 : 2.0)
     .attr("stroke-dasharray", bold ? [4,4] : [3,3])
     .attr("stroke", bold ? "#0055AA" : "#0080FF");	// dark/light Blue-green
-//      .attr("stroke", "#AA00FF");
+}
+
+// Draw IPI arc from x0 y0 to x1 y1
+function draw_arc_ipi(x0, y0, x1, y1) {
+  // Only show the IPI arcs if bold is set
+  if (state2.arcs_value != 1) {return;}
+
+  var arcpath = make_arc_path(x0, y0, x1, y1);
+  if (arcpath == "") {return;}
+
+  innersvgdotg.append("path")
+    .attr("class", "graphlinex")
+    .attr("d", arcpath)
+    .attr("fill", "none")
+    .attr("stroke-width", 2)
+    .attr("stroke-dasharray", [9,3])
+    .attr("stroke", "#C0C0C0");		// light gray
+}
+
+function draw_arc(d, x0, y0, x1, y1) {
+  if      (is_arc(d)) {draw_arc_wake(x0, y0, x1, y1);}
+  else if (is_ipi(d)) {draw_arc_ipi(x0, y0, x1, y1);}
 }
 
 // Names for things...
@@ -2669,10 +2822,10 @@ function overlaydraw(d, gray) {
     draw_dots(d, left_t, right_t);
   } else if (is_callout(d)) {
     draw_callout(d, left_t, right_t);
-  } else if(!gray && is_arc(d)) {
+  } else if (!gray && (is_arc(d) || is_ipi(d))) {
     // SOON draw_arc(d, left_t, right_t);
     // Arc starts at <tsrel, cpu> and goes to <tsrel + dur, cpu2>, where
-    // Arc starts at <tsrel, pid> and goes to <tsrel + dur, pid2>, where
+    // Arc 2 starts at <tsrel, pid> and goes to <tsrel + dur, pid2>, where
     // cpu2 is stored in the arg0 field, pid2 in the ret field
     var x0 = x_zoomed(ts(d));
     var x1 = x_zoomed(tsend(d));
@@ -2687,9 +2840,9 @@ function overlaydraw(d, gray) {
     var e_height1 = perTracksize[t_height1].eventheight;
     var y1 = y_zoomed(track1) + perTracksize[t_height1].eventoffset - (e_height1 / 2);
     var valid_arc = (0 <= row0) && (0 <= row1) && (t_height0 != 0)&& (t_height1 != 0);
-    if (valid_arc) {draw_arc( d, x0, y0, x1, y1);}
+    if (valid_arc) {draw_arc(d, x0, y0, x1, y1);}
 
-    // Draw pid to pid2 arc if PIDs are being shown and both rows are valid
+    // Also draw pid to pid2 arc if PIDs are being shown and both rows are valid
     if (state2.groupcompress[1] == 0) {return;}
     var row2 = getrow_pid(d, prefixPid);
     var row3 = getrow_pid2(d, prefixPid);
@@ -2823,7 +2976,8 @@ function draw_pstate(d, x0, y0, x1, gray, height) {
 // Draw one PC sample
 function draw_pc_samp(d, x0, y0, x1, gray, height) {
   if (state2.samp_value <= 0) {return;}	// PC samples off or unavailable
-  if (pid(d) == 0) {return;}		// Event is pc_samp, but pid 0 = idle
+  if ((state2.samp_value == 2) && (pid(d) == 0)) {return;}  // Event is pc_samp, but pid 0 = idle
+  if ((state2.samp_value == 1) && (pid(d) != 0)) {return;}  // Event is pc_samp, and pid 0 = idle
   var samp_px = x1 - x0;
   if (samp_px < 2) {return};		// Avoid short pixel clutter
   if ((3 * height) < 0.5) {return;}	// Avoid too thin to see 
@@ -3382,7 +3536,7 @@ function slowDrawOnRow(row, d, gray) {
 
   // Layer on top the IPC triangle
   if (!gray && (0 < state2.ipc_value)) {
-    draw_one_ipc(d, (x0 + x1) / 2, y0, e_height * 0.67);
+    draw_one_ipcllc(d, (x0 + x1) / 2, y0, e_height * 0.67);
   }
 }
 
@@ -3543,7 +3697,12 @@ function draw_on_row(row, d, gray) {
 function eventHilite(i) {
   var d = data.events[i];
   if ((0 < state.fade) && is_kui(d)) {return false;}
-  if (state.hilite_evnum != 0) {return (ev(d) == state.hilite_evnum);}
+  if (state.hilite_evnum != 0) {
+    // One or two right-clicked events
+    if ((state.hilite_evnum != 0) && (ev(d) == state.hilite_evnum)) {return true;}
+    if ((state.hilite_evnum2 != 0) && (ev(d) == state.hilite_evnum2)) {return true;}
+    return false;
+  }
   if (hilite_event_set.size == 0) {return true;}
   return hilite_event_set.has(i);
 }
@@ -3551,7 +3710,7 @@ function eventHilite(i) {
 
 // Full height if in set, treating empty set as highlight-all
 function rowFullsize(row) {
-  if (state2.grouphashilite[getGroup(row)] == 0) return true;
+  if (state2.grouphashilite[getGroup(row)] == false) return true;
   return state2.rowToHilite[row];
 }
 
@@ -3643,6 +3802,7 @@ function fastdrawevents() {
     }
 
     // Accumulate all on-screen events that match hilite_evnum
+    // Do not count secondary evnum2 matches
     //   (follow logic in annotatesearch2)
     if ((ev(d) == state.hilite_evnum) && 
         strictly_startsonscreen_x(d) && onscreen_all_y(d)) {
@@ -3872,13 +4032,36 @@ function do_zoomed_y() {
 //console.log("end do_zoomed_y ----------");
 }
  
+function CheckHilites(label, hilite) {
+  var ok = true;
+  for (var i = 0; i < hilite.length; ++i) {
+    if (1 < hilite[i]) {ok = false;}
+    if (hilite[i] < 0) {ok = false;}
+  }
+  if (!ok) {console.log(label, "FAIL", hilite);}
+}
+
+// Expecting two equal arrays
+function CheckSame(a, b) {
+  if (a.length != b.length) {
+    console.log("CheckSame length mismatch:", a.length, b.length);
+    console.log(a, b);
+    return;
+  }
+  for (var i = 0; i < a.length; ++i) {
+    if (a[i] != b[i]) {
+      console.log("CheckSame element mismatch:", i, a[i], b[i]);
+    }
+  }
+}
+
 
 // Recalculate event highlights from just the highlighted rows
 function RecalcEventHilites() {
   hilite_event_set.clear();
   for (var row = 0; row < sortNumSize; ++row) {
     if (state2.rowToHilite[row]) {
-      setEventHilites(row, 1);
+      setEventHilites(row, true);
     }
   }
 }
@@ -3893,6 +4076,7 @@ function RecalcGroupHilites() {
 
 // Recalculates globals derived from just-changed main state
 function RecalcDerivedState() {
+  CheckHilites("Recalc",  state2.rowToHilite);
   calc_regionheightwidth();
   currentcolor = (state2.cb_value == 0) ? normalcolor : colorblindcolor;
   RecalcEventHilites();		// from rowToHilite
@@ -3928,7 +4112,7 @@ function CompressHilite(hilite) {
     if (hilite[i] != 0) {
       InsertZerocount(zerocount, retval);
       zerocount = 0;
-      retval.push(hilite[i]);
+      retval.push(+hilite[i]);
     } else {
       ++zerocount;
     }
@@ -3937,16 +4121,17 @@ function CompressHilite(hilite) {
   return retval;
 }
 
-// Replace values >= 2 with that many zero elements. Idempotent if already decompressed.
+// Replace values >= 2 with that many false elements. Idempotent if already decompressed.
 function DecompressHilite(hilite) {
   var retval = [];
   for (var i = 0; i < hilite.length; ++i) {
     if (2 <= hilite[i]) {
-      for (var j = 0; j < hilite[i]; ++j) {retval.push(0);}
+      for (var j = 0; j < hilite[i]; ++j) {retval.push(false);}
     } else {
-      retval.push(hilite[i]);
+      retval.push(hilite[i] != 0);
     }
   }
+  CheckHilites("Decomp",  retval);
   return retval;
 }
 
@@ -3960,9 +4145,16 @@ console.log("BUG: CompressStringify called with a string");
   } else {
     inval = stateobj;
   }
-  inval.rowToHilite = CompressHilite(inval.rowToHilite);
+  // NOTE: if the argument is state2,state2.rowToHilite is MODIFIED here !
+  var temp = inval.rowToHilite;
+  var temp1 = CompressHilite(inval.rowToHilite);
+  var temp2 = DecompressHilite(temp);
+CheckSame(temp, temp2);
+
+  inval.rowToHilite = temp1;
   var retval = stringifyState(inval);
 //console.log("CompressStringify", retval);
+  inval.rowToHilite = temp;	// Restore original
   return retval;
 }
 
@@ -3976,7 +4168,7 @@ console.log("BUG: DecompressUnstringify called with a non-string");
     retval = stateobj;
   }
   retval.rowToHilite = DecompressHilite(retval.rowToHilite);
-//console.log("DecompressUnstringify", retval);
+  //console.log("DecompressUnstringify", retval);
   return retval;
 }
 
@@ -3988,7 +4180,9 @@ function packupState() {
 
 // After restoring state, put Sets and derived main state variables back
 function unpackState(savedstr) {
+//console.log("unpackState", savedstr);
   state2 = DecompressUnstringify(savedstr);
+  CheckHilites("Unpack", state2.rowToHilite);
   RecalcDerivedState();
 }
 
@@ -4032,7 +4226,7 @@ function resetzoom() {
 function ZoomToLeftWidth(xleft, xwidth) {
 //console.log("ZoomToLeftWidth", xleft, xwidth);
   // Avoid zdiv if tinier than 10 nsec full screen width
-  if (xwidth < 0.000000010) {xwidth = 0.000000010;}
+  if (xwidth < NSEC10) {xwidth =NSEC10;}
 
   // Calculate new scale based on desired width vs. scale=1.0 width
   // x is a function that maps times to pixels:
@@ -4143,7 +4337,6 @@ function SeekTime(needle) {
   ZoomToLeftWidth(target - sidewidth, 2 * sidewidth);
 }
  
- const ten_nsec = 0.000000010;
 
 // Convert the current position and width into the nearest encompassing
 // value for SeekTime
@@ -4153,7 +4346,7 @@ function SeekCurrent(needle) {
   var ts_half_width = (realxright - realxleft) / 2;
   var center = realxleft + ts_half_width;
   
-  var atleast = ten_nsec;	// There will be 2.5% slop on both ends in SeekTime
+  var atleast = NSEC10;		// There will be 2.5% slop on both ends in SeekTime
   var i;			// Round up here to 3% to make multiple @@'s stable
   for (i = 0; i < 8; ++i) {
     if (ts_half_width <= atleast * 5 * 1.03) {break;}
@@ -4226,6 +4419,7 @@ function annotatesearch2(needle, mindur, maxdur) {
   state.annotated_d = [];
   state2.annotated_one_d = -1;
   state.hilite_evnum = 0;
+  state.hilite_evnum2 = 0;
 
   resetRotatingLabelk();
 
@@ -4239,8 +4433,19 @@ function annotatesearch2(needle, mindur, maxdur) {
     var d = data.events[i];
     if(strictly_startsonscreen_x(d) && onscreen_all_y(d)) {	// On screen
       var hit = (fullname(d, false).search(needle) >= 0);	// Name match
+      // 2024.04.01 also match on ipc=xxx or llc=xxx if 
+      // ipc(d) nonzero and item duration is > 10ns (skips markers, etc.)
+      // Note that this match is case-senstive and a regex, so use 
+      // ipc=3\. to distinguish from ipc=3/8
+      // or llc=64$ to distinguish from llc=64K
+      if ((ipc(d) > 0) && (dur(d) > NSEC10) && (needle[3] == '=')) {
+        var tmptext = "";
+        if (has_ipc) {tmptext += " ipc=" + ipcvalues[realipc(d)];}
+        if (has_llc) {tmptext += " llc=" + llcvalues[realllc(d)];}
+        hit |= (tmptext.search(needle) >= 0);
+      }
       hit &= ((name(d)[0] != '-') || needle_hyphen);		// But not initial hyphen unless in needle
-      ////hit |= (rpc(d).toString().search(needle) >= 0); 		// Or rpcid (not in fullname)
+      ////hit |= (rpc(d).toString().search(needle) >= 0); 	// Or rpcid (not in fullname)
       hit &= (mindurval <= dur(d)) && (dur(d) <= maxdurval);	// And within duration range
       // Invert search match if state2.searchnot_value = true
       if (hit != state2.searchnot_value) {
@@ -4604,6 +4809,9 @@ const errno_name = [
 ];
 
 // Create full event name
+// short: name(arg)
+// long, simple annot: name
+// long, normal annot: name(arg)=ret
 function fullname(d, short) {
   var fulltext;
   var arg = arg0(d);
@@ -4697,15 +4905,22 @@ function draw_one_annot(d, vx, vy,  liney, linedy,  dotsy, dotsdy,  fulltext, an
   }
 }
 
-// Create complet text for d. Includes ipc/llc.
+// xx.xxus fullname; dur ipc= llc=
+// Create complete text for d. Includes ipc/llc value.
 function complete_text(d) {
+    // Diddle state2.annottype_value so e always see fsyscall arg/ret in fullname
+    // TODO: rationalize all the display choices
+    var temp = state2.annottype_value;
+    state2.annottype_value = 0;
     var fulltext =  shortnum5(tsrel(d)) + " " + fullname(d, false) + "; " + 
       shortnum(dur(d), data.thousandsX) + data.shortUnitsX;
+    state2.annottype_value = temp;
     if ((0 <= state2.ipc_value) && (is_executable(d))) {	// available and real execution span
-      if (ipc_really_llc) {
-        fulltext += " llc=" + llcvalues[ipc(d)];
-      } else {
-        fulltext += " ipc=" + ipcvalues[ipc(d)];
+      if (has_ipc) {
+        fulltext += " ipc=" + ipcvalues[realipc(d)];
+      }
+      if (has_llc) {
+        fulltext += " llc=" + llcvalues[realllc(d)];
       }
     }
     return fulltext;
@@ -4774,19 +4989,23 @@ function annotatespan(d, clss, short, my, rotate) {
     if (rotate) {rotateRow(row, maxannot);}
 
     // Create text string
+    // short:  fullname
+    // simple: fullname
+    // long:   xx.xxus fullname ipc= llc=
     var timetxt = shortnum5(tsrel(d));
     var fulltext = fullname(d, short);
     if (!short) {
-      // Long form includes start time, duration, and IPC
+      // Long form includes start time, duration, and IPC/LLC
       // Except if simple annot, just full name
       if (!state2.annottype_value) {
         fulltext = timetxt + " " + fulltext + "; " + 
           shortnum(dur(d), data.thousandsX) + data.shortUnitsX;
         if ((0 <= state2.ipc_value) && (is_executable(d))) {	// available and real execution span
-          if (ipc_really_llc) {
-            fulltext += " llc=" + llcvalues[ipc(d)];
-          } else {
-            fulltext += " ipc=" + ipcvalues[ipc(d)];
+          if (has_ipc) {
+            fulltext += " ipc=" + ipcvalues[realipc(d)];
+          }
+          if (has_llc) {
+            fulltext += " llc=" + llcvalues[realllc(d)];
           }
         }
       }
@@ -4894,6 +5113,7 @@ function mousedown_x() {
 
     // Shift-RIGHT-click highights all same-event-number items, fades others
     if (0 < d3.event.button) {
+      state.hilite_evnum2 = state.hilite_evnum;
       state.hilite_evnum = ev(d1);
       resetText(document.getElementById("SearchText"), name(d1));
       // Draw all events onscreen, plus marks, plus IPC
@@ -5012,13 +5232,14 @@ function mouseup_x() {
       state2.annotated_one_d = -1;
       if (state.hilite_evnum != 0) {
         state.hilite_evnum = 0;
+        state.hilite_evnum2 = 0;
         // Draw all events onscreen, plus marks, plus IPC
         redrawEvents();
       }
     }
 }
 
-// Display name of current item in lower left corner of region 3
+// Display live name of current mouseover item in lower left corner of region 3
 function delayed_mousemove_event(xpx, ypx) {
   // Find nearest data object, use hilo
   var i = FindNearestEvent(xpx, ypx, true); 
@@ -5053,7 +5274,7 @@ function delayed_mousemove_event(xpx, ypx) {
 }
 
 // Fires continuously with mouse movement in region 3
-// If over a timespan, display it
+// If mouseover a timespan, display it
 function mousemove_region3() {
   d3.event.stopPropagation();
   var m = d3.mouse(this);
@@ -5316,7 +5537,8 @@ function mousedown_y(m) {
   // Backmap and turn on highlights here
   var hilite_row = doSnap_y(m[1]);
 //console.log("  hilite_row", hilite_row, sortName[hilite_row], state2.rowToHilite[hilite_row]);
-  var newhilite = state2.rowToHilite[hilite_row] ^ 1;
+  var newhilite = !state2.rowToHilite[hilite_row];
+  //if ((newhilite < 0) || (1 < newhilite)) {newhilite = 0;}	// Make robust
   
   // Shift-click highlights one row
   // Shift-RIGHT-click highlights all rows with matching name prefix
@@ -5335,6 +5557,8 @@ function mousedown_y(m) {
       }
     }
   }
+  CheckHilites("Click", state2.rowToHilite);
+
   
   // Now highlight all the events in currently-highlighted rows
   RecalcEventHilites();		// from rowToHilite
@@ -5686,7 +5910,7 @@ function calculateBasetime() {
     xaxisfmt.ovflnext = Math.floor(baseleft * 1000000 + 1) % 1000;
     xaxisfmt.ovflformat = "03d"; 
     xaxisfmt.deltaformat = "05.1f"; 	
-    if (0.000000010 <= xaxisspan) {xaxisfmt.deltaformat = "03d";}
+    if (NSEC10 <= xaxisspan) {xaxisfmt.deltaformat = "03d";}
     document.getElementById("xaxislabel").innerHTML = "Time (nsec)";
   }
   // If bare, suppress basetime text
@@ -6436,7 +6660,7 @@ function redrawUI() {
   decorateButton3(document.getElementById("showfreq"), state2.freq_value);
 
   decorateButton4(document.getElementById("showipc"), state2.ipc_value);
-  decorateButton(document.getElementById("showsamp"), state2.samp_value);
+  decorateButton3(document.getElementById("showsamp"), state2.samp_value);
   decorateButton(document.getElementById("showcb"), state2.cb_value);
 
   ////decorateButton(document.getElementById("AddAnnot"), 0);
@@ -6500,7 +6724,7 @@ function doToggleCmp(shifted, val, maxv) {
 function redrawIpcLegend() {
   var legendwidth = svgWidth - region2width - region4width;
   if (state2.ipc_value > 0) {
-    draw_ipclegend(legendwidth, 0, region234height, region4width); 
+    draw_ipcllclegend(legendwidth, 0, region234height, region4width); 
   } else {
     draw_emptylegend(legendwidth, 0, region234height, region4width);
   }
@@ -6585,6 +6809,7 @@ function doToggleAspect(e) {
 }
 // end UNUSED
 
+// Use shift key to get to the hidden show idle PC state
 function doToggleSamp(e) {
   if (state2.samp_value < 0) {return;}	// unavailable
   state2.samp_value = doToggle(e.shiftKey, state2.samp_value, samp_value_max);
@@ -7411,7 +7636,7 @@ function getDataMetadata(data) {
 //console.log("X: ", realxleft, "..", realxright);
 
   // Initialize rowToHighlighted
-  state2.rowToHilite = new Array(sortNum.length).fill(0);
+  state2.rowToHilite = new Array(sortNum.length).fill(false);
 
   // Now fill in rowToHeight  and rowToTrack 
   rowToHeight = new Array(sortNum.length).fill(10);
@@ -7518,19 +7743,21 @@ function newdata2(data2) {
     data.extra = [];
   }
 
-  // Grab the IPC flag; ipc_value=-1 means no IPC data available
+  // Grab the IPC and LLC flags
+  has_ipc = (data.flags & 128) != 0;
+  has_llc = (data.flags & 32) != 0;
+  has_both = has_ipc & has_llc;
+
+  // ipc_value=-1 means no IPC or LLC data available
   state2.ipc_value = 0;
-  if ((data.flags & 128) == 0) {state2.ipc_value = -1;}
-  ipc_really_llc = false;
-  // LLC misses hack
-  if ((data.flags & 32) != 0) {
-    ipc_really_llc = true; 
-    state2.ipc_value = 0;
-    document.getElementById("showipc").textContent = "LLC";
-console.log("ipc_really_llc = true");
-  }
+  if (!has_ipc & !has_llc) {state2.ipc_value = -1;}
+
+  // Set the IPC/LLC button text
+  document.getElementById("showipc").textContent = "IPC"
+  if (!has_ipc & has_llc) {document.getElementById("showipc").textContent = "LLC";}
+  if (has_ipc & has_llc) {document.getElementById("showipc").textContent = "Both";}
   
-    // Remember if this is from a high-overhead RISC-V CPU
+  // Remember if this is from a high-overhead RISC-V CPU
   is_riscv = false;
   if ((typeof data.cpuModelName !== 'undefined') && 
       (data.cpuModelName.search("u74-mc") >= 0)) {
@@ -7996,12 +8223,12 @@ function OVevent(widthpx, evnum, arg, ipc, name) {
     // xx(d, x0, y0, x1, gray, e_height)
     draw_user(d, x0, y0, x1, false, height);
     var oldfade = fade_value; fade_value = 0;
-      draw_one_ipc(d, x0 + (widthpx/2), y0, height * 0.67);
+      draw_one_ipcllc(d, x0 + (widthpx/2), y0, height * 0.67);
     fade_value = oldfade;
   } else if (is_kernel(d) && !is_ovhd(d) && !is_rxtx(d)) {
     draw_kernel(d, x0, y0, x1, false, height);
     var oldfade = fade_value; fade_value = 0;
-      draw_one_ipc(d, x0 + (widthpx/2), y0, height * 0.67);
+      draw_one_ipcllc(d, x0 + (widthpx/2), y0, height * 0.67);
     fade_value = oldfade;
   } else if (is_idle(d)) {
     draw_idle(d, x0, y0, x1, false, height);

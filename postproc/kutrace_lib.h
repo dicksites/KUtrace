@@ -1,7 +1,7 @@
-// kutrace_lib.h
+// kutrace_lib.h 
 // Copyright 2023 Richard L. Sites
 //
-// This is a simple interface for user-mode code to control kernel/user tracing and
+// This is a simple interface for user-mode code to control kernel/user tracing and 
 // to add markers
 //
 
@@ -17,13 +17,13 @@ typedef int64  s64;
 
 typedef struct {
   int number;
-  const char* name;
+  const char* name; 
 } NumNamePair;
 
 
 /* This is the definitive list of raw trace 12-bit event numbers */
-// These user-mode declarations need to exactly match
-// source pool kutrace.h kernel-mode ones
+// These user-mode declarations need to exactly match 
+// source pool kutrace.h kernel-mode ones 
 
 /* kutrace_control() commands */
 #define KUTRACE_CMD_OFF 0
@@ -50,7 +50,7 @@ typedef struct {
 // +-------------------+-----------+---------------+-------+-------+
 // | timestamp         | event     | delta | retval|      arg0     |
 // +-------------------+-----------+---------------+-------+-------+
-//          20              12         8       8           16
+//          20              12         8       8           16 
 
 // Add KUTRACE_ and uppercase
 #define KUTRACE_NOP             0x000
@@ -70,7 +70,7 @@ typedef struct {
 // +- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -+
 // ~                                                               ~
 // +---------------------------------------------------------------+
-//          20              12                    32
+//          20              12                    32 
 
 // TimePair (DEFUNCT)
 // +-------------------+-----------+-------------------------------+
@@ -80,10 +80,10 @@ typedef struct {
 // +---------------------------------------------------------------+
 // |   matching gettimeofday value                                 |
 // +---------------------------------------------------------------+
-//          20              12                    32
+//          20              12                    32 
 
 
-// Variable-length starting numbers.
+// Variable-length starting numbers. 
 // Middle hex digit will become length in u64 words, 2..8
 #define KUTRACE_FILENAME        0x001
 #define KUTRACE_PIDNAME         0x002
@@ -120,7 +120,7 @@ typedef struct {
 // +-------------------+-----------+-------------------------------+
 // | timestamp         | event     |              arg              |
 // +-------------------+-----------+-------------------------------+
-//          20              12                    32
+//          20              12                    32 
 
 #define KUTRACE_MARKA           0x20A
 #define KUTRACE_MARKB           0x20B
@@ -132,14 +132,14 @@ typedef struct {
 #define KUTRACE_LOCKACQUIRE     0x211
 #define KUTRACE_LOCKWAKEUP      0x212
         // unused               0x213
-
+        
 // Added 2020.10.29
-#define KUTRACE_RX_PKT          0x214 	/* Raw packet received w/32-byte payload hash */
+#define KUTRACE_RX_PKT          0x214 	/* Raw packet received w/32-byte payload hash */ 
 #define KUTRACE_TX_PKT          0x215 	/* Raw packet sent w/32-byte payload hash */
 
-#define KUTRACE_RX_USER         0x216 	/* Request beginning at user code w/32-byte payload hash */
+#define KUTRACE_RX_USER         0x216 	/* Request beginning at user code w/32-byte payload hash */ 
 #define KUTRACE_TX_USER         0x217 	/* Response ending at user code w/32-byte payload hash */
-
+  
 #define KUTRACE_MBIT_SEC        0x218 	/* Network rate in Mb/s */
 
 #define KUTRACE_RESOURCE	    0x219  /* Arbitrary resource span; arg says which resource */
@@ -166,7 +166,7 @@ typedef struct {
 /* Reasons for waiting, inserted only in postprocessing */
 /* dsites 2019.10.25 */
 #define KUTRACE_WAITA           0x300	/* a-z, through 0x0319 */
-#define KUTRACE_WAITZ           0x319
+#define KUTRACE_WAITZ           0x319		
 
 /* These are in blocks of 256 or 512 numbers */
 #define KUTRACE_TRAP            0x400
@@ -194,8 +194,7 @@ typedef struct {
 #define KUTRACE_LOCAL_TIMER_VECTOR     0xec
 
 /* Reuse the spurious_apic vector to show bottom halves executing */
-// XXX: Changed from 255 to 241 for Android
-#define KUTRACE_BOTTOM_HALF    241
+#define KUTRACE_BOTTOM_HALF    255
 #define AST_SOFTIRQ		    	15
 
 #define RESCHEDULE_VECTOR      IPI_PREEMPT
@@ -206,7 +205,7 @@ typedef struct {
 
 // Names for the variable-length events 0y0-0yF and 1y0-1yF, where y is length in words 2..8
 static const char* const kNameName[32] = {
-  "-000-", "file", "pid", "rpc",
+  "-000-", "file", "pid", "rpc", 
   "trap", "irq", "trap", "irq",
   "syscall", "syscall", "syscall", "syscall",
   "syscall32", "syscall32", "syscall32", "syscall32",
@@ -219,10 +218,10 @@ static const char* const kNameName[32] = {
 
 // Names for the special events 200-21F
 static const char* const kSpecialName[32] = {
-  "userpid", "rpcreq", "rpcresp", "rpcmid",
+  "userpid", "rpcreq", "rpcresp", "rpcmid", 
   "rxmsg", "txmsg", "runnable", "sendipi",
-  "mwait", "-freq-", "mark_a", "mark_b",
-  "mark_c", "mark_d", "-20e-", "-20f-",
+  "mwait", "-freq-", "mark_a", "mark_b", 
+  "mark_c", "mark_d", "-20e-", "-20f-", 
   "try_", "acq_", "rel_", "-213-",		// Locks
   "rx", "tx", "urx", "utx",
   "mbs", "res", "enq", "deq",
@@ -235,7 +234,7 @@ static const char* const kSpecialName[32] = {
 // Names for events 400-FFF are always embedded in the trace
 
 // x86- and ARM-specific Names for return codes -128 to -1
-// If errno is in [-128..-1], subscript this by -errno - 1.
+// If errno is in [-128..-1], subscript this by -errno - 1. 
 // Error -1 EPERM thus maps to kErrnoName[0], not [1]
 // See include/uapi/asm-generic/errno-base.h
 // See include/uapi/asm-generic/errno.h
@@ -246,20 +245,20 @@ static const char* const kErrnoName[128] = {
   "EEXIST", "EXDEV", "ENODEV", "ENOTDIR", "EISDIR", "EINVAL", "ENFILE", "EMFILE",
   "ENOTTY", "ETXTBSY", "EFBIG", "ENOSPC", "ESPIPE", "EROFS", "EMLINK", "EPIPE",
 
-  "EDOM", "ERANGE", "EDEADLK", "ENAMETOOLONG", "ENOLCK", "ENOSYS", "ENOTEMPTY", "ELOOP",
-  "", "ENOMSG", "EIDRM", "ECHRNG", "EL2NSYNC", "EL3HLT", "EL3RST", "ELNRNG",
-  "EUNATCH", "ENOCSI", "EL2HLT", "EBADE", "EBADR", "EXFULL", "ENOANO", "EBADRQC",
-  "EBADSLT", "", "EBFONT", "ENOSTR", "ENODATA", "ETIME", "ENOSR", "ENONET",
+  "EDOM", "ERANGE", "EDEADLK", "ENAMETOOLONG", "ENOLCK", "ENOSYS", "ENOTEMPTY", "ELOOP", 
+  "", "ENOMSG", "EIDRM", "ECHRNG", "EL2NSYNC", "EL3HLT", "EL3RST", "ELNRNG", 
+  "EUNATCH", "ENOCSI", "EL2HLT", "EBADE", "EBADR", "EXFULL", "ENOANO", "EBADRQC", 
+  "EBADSLT", "", "EBFONT", "ENOSTR", "ENODATA", "ETIME", "ENOSR", "ENONET", 
 
-  "", "", "", "", "", "", "", "",
-  "", "", "", "", "", "", "", "",
-  "", "", "", "", "", "", "", "",
-  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "", 
+  "", "", "", "", "", "", "", "", 
+  "", "", "", "", "", "", "", "", 
+  "", "", "", "", "", "", "", "", 
 
-  "", "", "", "", "", "", "", "",
-  "", "", "", "", "", "", "", "",
-  "", "", "", "", "", "", "", "",
-  "", "", "", "", "", "", "", "",
+  "", "", "", "", "", "", "", "", 
+  "", "", "", "", "", "", "", "", 
+  "", "", "", "", "", "", "", "", 
+  "", "", "", "", "", "", "", "", 
 };
 
 
@@ -274,7 +273,7 @@ namespace kutrace {
   void mark_d(u64 n);
 
   // Returns number of words inserted 1..8, or
-  //   0 if tracing is off, negative if module is not not loaded
+  //   0 if tracing is off, negative if module is not not loaded 
   u64 addevent(u64 eventnum, u64 arg);
   void addname(u64 eventnum, u64 number, const char* name);
 

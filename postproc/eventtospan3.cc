@@ -65,6 +65,8 @@
 // 2022.06.05 dsites Allow mwait(0) for C1 state, add mwait exit event
 // 2022.06.05 dsites Get pid (later: rpc names to track over time if they change
 // 2023.07.24 dsites Make default syscall dff, not 9ff
+// 2024.07.03 dsites Add MakeIPISpan processing
+// 2024.07.06 dsites Do CPU-related cexit latency tables
 
 // Compile with  g++ -O2 eventtospan3.cc -o eventtospan3
 
@@ -116,6 +118,7 @@
 
 // Additional drawing events
 #define ArcNum       	-3
+#define ArcIPINum      	-7
 
 static const char* kIdleName = "-idle-";
 static const char* kIdlelpName = "-idlelp-";
@@ -176,6 +179,51 @@ static const int kLatencyTable[256] = {
   // [254] RPI4-B wfi() guess
   // [255] AMD mwait guess
 };
+
+// Scraped from 6.6.36 linux-6.6.36/drivers/idle/intel_idle.c on 2024.07.05
+// Subscripted by mwait_arg>>4
+
+// {"nehalem_cstates", {10,20,200,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"snb_cstates", {10,80,104,109,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"byt_cstates", {1,255,255,255,255,500,10000,255,255,255,255,255,255,255,255,255,}},
+// {"cht_cstates", {1,255,255,255,255,200,10000,255,255,255,255,255,255,255,255,255,}},
+// {"ivb_cstates", {10,59,80,87,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"ivt_cstates", {10,59,82,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"ivt_cstates_4s", {10,59,84,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"ivt_cstates_8s", {10,59,88,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"hsw_cstates", {10,33,133,166,300,600,2600,255,255,255,255,255,255,255,255,255,}},
+// {"bdw_cstates", {10,40,133,166,300,600,2600,255,255,255,255,255,255,255,255,255,}},
+// {"skl_cstates", {10,70,85,124,200,480,890,255,255,255,255,255,255,255,255,255,}},
+// {"skx_cstates", {10,255,133,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"icx_cstates", {4,255,170,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"adl_cstates", {2,255,220,255,280,255,680,255,255,255,255,255,255,255,255,255,}},
+// {"adl_l_cstates", {2,255,170,255,200,255,230,255,255,255,255,255,255,255,255,255,}},
+// {"gmt_cstates", {2,255,195,255,260,255,660,255,255,255,255,255,255,255,255,255,}},
+// {"spr_cstates", {2,255,290,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"atom_cstates", {10,20,255,100,255,140,255,255,255,255,255,255,255,255,255,255,}},
+// {"tangier_cstates", {1,255,255,100,255,140,10000,255,255,255,255,255,255,255,255,255,}},
+// {"avn_cstates", {2,255,255,255,255,15,255,255,255,255,255,255,255,255,255,255,}},
+// {"knl_cstates", {1,120,255,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"bxt_cstates", {10,255,133,155,1000,2000,10000,255,255,255,255,255,255,255,255,255,}},
+// {"dnv_cstates", {10,255,50,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+// {"snr_cstates", {15,255,130,255,255,255,255,255,255,255,255,255,255,255,255,255,}},
+
+typedef struct {
+  const char* name;
+  const int lat[16];
+} CexitLatency;
+
+static const CexitLatency kLatencyTable2[] = {
+  // Kaby Lake Sky Lake skl
+  {"i3-7100", {10,70,85,124,200,480,890,255,255,255,255,255,255,255,255,255,}},
+  // Goldmont bxt
+  {"J4005", {10,255,133,155,1000,2000,10000,255,255,255,255,255,255,255,255,255,}},
+  // Default must be last. Drawn from Haswell hsw
+  {NULL,      {10,33,133,166,300,600,2600,255,255,255,255,255,255,255,255,255,}}
+};
+
+// Sixteen-entry table of per-CPU-type c-exit latencies
+static const int* NewLatTable2 = NULL;
 
 // 2**0.0 through 2** 0.9
 static const double kPowerTwoTenths[10] = {
@@ -340,6 +388,7 @@ typedef map<int, PidState> PerPidState;	// State of each suspended task, by PID
 typedef map<int, string> IntName;	// Name for each PID/lock/method
 typedef map<int, OneSpan> PidWakeup;	// Previous wakeup event, by PID
 typedef map<int, uint64> PidTime;	// Previous per-PID timestamp (span end, kernel-seen packet)
+typedef map<int, uint> CpuTarg;		// Previous per-PID lock hash number
 typedef map<int, uint> PidLock;		// Previous per-PID lock hash number
 typedef map<int, uint> PidHash32;	// Previous per-PID pending user packet hash number
 typedef map<int, bool> PidRunning;	// Set of currently-running PIDs
@@ -503,6 +552,7 @@ IntName pidnames;		  // Current name for each PID, by pid#
 IntName pidrownames;		  // Collected names for each PID (clone, execve, etc. rename a thread), by pid#
 				  //   Accumulates name sn order over time
 PidWakeup pendingWakeup;	  // Any pending wakeup event, to make arc from wakeup to running
+PidWakeup pendingIPI;	 	  // Any pending IPI event, to make arc from sender to target CPU
 PidWakeup priorPidEvent;	  // Any prior event for each PID, to make wait_xxx display
 PidTime priorPidEnd;	 	  // Any prior span end for each PID, to make wait_xxx display
 PidLock priorPidLock;	 	  // Any prior lock hash number for each PID, to make wait_xxx display
@@ -641,6 +691,12 @@ bool IsPidNameInt(int eventnum) {
 // (2) UserPid point event
 bool IsAContextSwitch(const OneSpan& event) {
   return (event.eventnum == KUTRACE_USERPID);
+}
+
+// (2) Trigger IPI point event
+bool IsAnIPI(const OneSpan& event) {
+  return ((event.eventnum == KUTRACE_IPI) || 
+    (event.eventnum == KUTRACE_MONITORSTORE));
 }
 
 // (2) Make-runnable point event
@@ -1001,6 +1057,22 @@ int FloorLg(uint64 x) {
   return lg;
 }
 
+// If one of the built-in tables has a CPU name string that is found in
+// the incoming cpu_model_name, use the corresponding c-exit latency table.
+void SetNewLatTable2() {
+  if (cpu_model_name.empty()) {return;}	// Leave SetNewLatTable2 NULL
+  int k = 0;
+  while (kLatencyTable2[k].name != NULL) {
+    if (cpu_model_name.find(kLatencyTable2[k].name) != string::npos) {
+      fprintf(stderr, "  Using c-exit latency table '%s'\n", 
+              kLatencyTable2[k].name); 
+      NewLatTable2 = &kLatencyTable2[k].lat[0];
+    }
+    ++k;
+  }
+  // If no match, leave SetNewLatTable2 NULL
+}
+
 
 // Close off the current span
 // Remember each user-mode PID end in priorPidEnd
@@ -1080,6 +1152,7 @@ void StartSpan(const OneSpan& event, OneSpan* span) {
 void MakeArcSpan(const OneSpan& event1, const OneSpan& event2, OneSpan* span) {
   span->start_ts = event1.start_ts;
   span->duration = event2.start_ts - event1.start_ts;
+  if (span->duration > kMAX_PLAUSIBLE_DURATION) {span->duration = 1;}
   span->cpu = event1.cpu;
   span->pid = event1.pid;
   span->rpcid = event1.rpcid;
@@ -1088,6 +1161,20 @@ void MakeArcSpan(const OneSpan& event1, const OneSpan& event2, OneSpan* span) {
   span->retval = event2.pid;	// Added 2020.08.20
   span->ipc = 0;
   span->name = "-wakeup-";
+}
+
+void MakeIPISpan(const OneSpan& event1, const OneSpan& event2, OneSpan* span) {
+  span->start_ts = event1.start_ts;
+  span->duration = event2.start_ts - event1.start_ts;
+  if (span->duration > kMAX_PLAUSIBLE_DURATION) {span->duration = 1;}
+  span->cpu = event1.cpu;
+  span->pid = -1;
+  span->rpcid = -1;
+  span->eventnum = ArcIPINum;
+  span->arg = event2.cpu;
+  span->retval = 0;
+  span->ipc = 0;
+  span->name = "-ipi-";
 }
 
 // Waiting on reason c from event1 to event2. For PID or RPC, not on any CPU
@@ -1272,6 +1359,7 @@ void InitialJson(FILE* f, const char* label, const char* basetime) {
   if (!cpu_model_name.empty()) {
     Clean(&cpu_model_name);
     fprintf(f, " \"cpuModelName\" : \"%s\",\n", cpu_model_name.c_str());
+    SetNewLatTable2();
   }
   if (!host_name.empty()) {
     Clean(&host_name);
@@ -1512,6 +1600,14 @@ void DoWakeup(const OneSpan& event, CPUState* cpustate, PerPidState* perpidstate
 
   // Any subsequent waiting will be for CPU, starting at this wakeup
   priorPidEnd[target_pid] = event.start_ts + event.duration;
+}
+
+void DoIPI(const OneSpan& event, CPUState* cpustate, PerPidState* perpidstate) {
+  CPUState* thiscpu = &cpustate[event.cpu];
+  int target_cpu = event.arg;
+  // Remember the IPI
+  pendingIPI[target_cpu] = event;
+  ////fprintf(stdout, "pendingIPI[%d]=%lld\n", target_cpu, event.start_ts);
 }
 
 void SwapStacks(int oldpid, int newpid, const string& name, CPUState* thiscpu, PerPidState* perpidstate) {
@@ -1891,14 +1987,20 @@ if (verbose) fprintf(stdout, " ===marking old stack ambiguous at ctx_switch to %
       lockpending.erase(subscr);
     }
 
-
-
     // Point event
     // Remember any make-runnable, aka wakeup, event by target pid, for drawing arc
     if (IsAWakeup(event)) {
       WaitBeforeWakeup(event, cpustate, perpidstate);
       DoWakeup(event, cpustate, perpidstate);
       WaitAfterWakeup(event, cpustate, perpidstate);
+    }
+    
+    // Remember and sendipi or monotor-store as start of interprocessor
+    // get-target-CPU-going arc. Target in arg0
+    if (IsAnIPI(event)) {
+      // Put this event in map for target CPU. 
+      DoIPI(event, cpustate, perpidstate);
+      // Subsequently, draw ipi arc to next event on that CPU 
     }
 
     return;
@@ -1927,6 +2029,20 @@ if (verbose) fprintf(stdout, " ===marking old stack ambiguous at ctx_switch to %
     WriteSpanJson(stdout, thiscpu);	// Standalone arc span
     // Consume the pending wakeup
     pendingWakeup.erase(event.pid);
+    thiscpu->cur_span = temp_span;		// Restore
+  }
+  
+  // Connect IPI event to new span if the CPU number matches
+  if (pendingIPI.find(event.cpu) != pendingIPI.end()) {
+    // We are at an event for which there is a pending IPI delivery
+    // Make an IPI arc
+  ////fprintf(stdout, "found pendingIPI[%d]=%lld\n", event.cpu, pendingIPI[event.cpu].start_ts);
+    OneSpan temp_span = thiscpu->cur_span;	// Save
+    MakeIPISpan(pendingIPI[event.cpu], event, &thiscpu->cur_span);
+    ////DumpSpan(stdout, "IPIspan", &thiscpu->cur_span);
+    WriteSpanJson(stdout, thiscpu);	// Standalone arc span
+    // Consume the pending IPI
+    pendingIPI.erase(event.cpu);
     thiscpu->cur_span = temp_span;		// Restore
   }
 
@@ -2183,6 +2299,13 @@ if(verbose){fprintf(stdout, "InsertReturnAt 4\n");}
   return true;
 }
 
+uint64 NewLatencyLookup(uint64 exit_latency, int mwait_pending) {
+  if (NewLatTable2 == NULL) {
+    return exit_latency;
+  }
+  int subscr16 = (mwait_pending >> 4) & 0x0F;	// Top nibble
+  return NewLatTable2[subscr16] * 10;	// units of 10ns
+}
 
 // Fixup: Turn idle/mwait/idle/X into idle/mwait/idle/c-exit/X
 //   We are at X
@@ -2195,8 +2318,10 @@ bool FixupCexit(uint64 new_start_ts,
   PidState* thiscpu_stack = &thiscpu->cpu_stack;
 
   // Table entries are unknown units; they appear to be multiples of 100ns
-  uint64 exit_latency = kLatencyTable[thiscpu->mwait_pending] * 10;
-
+  uint64 exit_latency = kLatencyTable[thiscpu->mwait_pending] * 10; // 10ns unit
+  // Newer CPU-related code
+  exit_latency = NewLatencyLookup(exit_latency, thiscpu->mwait_pending);
+ 
   uint64 pending_span_latency = new_start_ts - thiscpu->cur_span.start_ts;
 
   bool good_mwait = (thiscpu->cpu_stack.top == 0); 	// Expecting to be in user-mode

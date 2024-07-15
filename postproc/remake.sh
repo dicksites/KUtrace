@@ -1,12 +1,9 @@
-#!/bin/sh
-#
-# Put in newer version of show_cpu.html template (in current directory)
-# usage: remake foo.html produces foo_2.html
-#
-# The sed step turns one extremely long line into one with carriage returns after
-# every closing bracket.
-#
+# Paste in new JavaScript template for a KUtrace HTML file
+# $1 is foo.html, output is foo_2.html
+# uses unmakeself, makeself, and ./unmake show_cpu.html in current directory
+# dick sites 2022.06.28
 
 fname=$1
-echo ${fname%.html}_2.html
 cat $1 |./unmakeself |sed 's/\], /\],\n/g' |./makeself show_cpu.html > ${fname%.html}_2.html
+echo "  ${fname%.html}_2.html written"
+

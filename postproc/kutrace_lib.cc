@@ -1,4 +1,4 @@
-// Little user-mode library program to control kutracing
+// Little user-mode library program to control kutracing 
 // Copyright 2023 Richard L. Sites
 //
 
@@ -8,7 +8,7 @@
 #include <time.h>	// nanosleep
 #include <unistd.h>     // getpid gethostname syscall
 #include <sys/time.h>   // gettimeofday
-#include <sys/types.h>
+#include <sys/types.h>	
 
 #if defined(__x86_64__)
 #include <x86intrin.h>		// _rdtsc
@@ -28,7 +28,7 @@ namespace {
 /* For the flags byte in traceblock[1] */
 #define IPC_Flag     CLU(0x80)
 #define WRAP_Flag    CLU(0x40)
-#define Unused2_Flag CLU(0x20)
+#define LLC_Flag     CLU(0x20)
 #define Unused1_Flag CLU(0x10)
 #define VERSION_MASK CLU(0x0F)
 
@@ -42,7 +42,7 @@ static const u64 kMin4KBModuleVersionNumber = 4;
 // This defines the format of the resulting trace file
 static const u64 kTracefileVersionNumber = 3;
 
-// NOTE: To use fast 4KB transfers out of trace buffer,
+// NOTE: To use fast 4KB transfers out of trace buffer, 
 //  IPC block must be at least 4KB and thus trace block must be at least 32KB.
 
 // Number of u64 values per 4KB
@@ -71,7 +71,7 @@ char kernelversion[GetbufSize];
 char modelname[GetbufSize];
 char hostname[GetbufSize];
 char linkspeed[GetbufSize];
-NumNamePair localirqpairs[256];	// At most 256 IRQ name/number pairs
+NumNamePair localirqpairs[256];	// At most 256 IRQ name/number pairs  
 irqname irqnames[256];		// At most 256 IRQ names
 
 
@@ -113,7 +113,7 @@ inline u64 ku_get_cycles(void)
 {
 	u64 timer_value;
 #if defined(__aarch64__)
-	asm volatile("mrs %x0, cntvct_el0" : "=r"(timer_value));
+	asm volatile("mrs %0, cntvct_el0" : "=r"(timer_value));
 #elif defined(__ARM_ARCH_ISA_ARM)
 	/* This 32-bit result at 54 MHz RPi4 wraps every 75 seconds */
 	asm volatile("mrrc p15, 1, %Q0, %R0, c14" : "=r" (timer_value));
@@ -165,9 +165,9 @@ void StripCRLF(char* s) {
   if ((0 < len) && s[len - 1] == '\r') {s[len - 1] = '\0'; --len;}
 }
 
-//--------------------------------------------------------------------------------------//
+//--------------------------------------------------------------------------------------// 
 // FreeBSD-specific routines
-//--------------------------------------------------------------------------------------//
+//--------------------------------------------------------------------------------------// 
 
 #if defined(__FreeBSD__)
 // FreeBSD syscalls are different.  The nice thing is that
@@ -235,7 +235,7 @@ void GetModelName(char* modelname, int len) {
   StripCRLF(modelname);
 }
 
-// Get next interrupt description line from file, if any, and set
+// Get next interrupt description line from file, if any, and set 
 // interrupt number and name and return value of true.
 // If no more lines, return false
 //
@@ -266,7 +266,7 @@ bool NextIntr(FILE* intrfile, int* intrnum, char* intrname, int len) {
     intrname[len - 1] = '\0';
     return true;
   }
-
+ 
   return false;
 }
 
@@ -293,13 +293,14 @@ void GetIrqNames(NumNamePair* irqpairs, irqname* irqnames) {
 
 #endif
 
-//--------------------------------------------------------------------------------------//
+//--------------------------------------------------------------------------------------// 
 // Linux-specific routines
-//--------------------------------------------------------------------------------------//
+//--------------------------------------------------------------------------------------// 
 
 #if !defined(__FreeBSD__)
 
 static const int __NR_kutrace_control = 1023;
+//static const int __NR_kutrace_control = 511;
 
 u64 inline DoControl(u64 command, u64 arg)
 {
@@ -332,13 +333,13 @@ void GetModelName(char* modelname, int len) {
   StripCRLF(modelname);
 }
 
-// Get next interrupt description line from file, if any, and set
+// Get next interrupt description line from file, if any, and set 
 // interrupt number and name and return value of true.
 // If no more lines, return false
 //
 // Expecting:
 // cat /proc/interrupts
-//            CPU0       CPU1
+//            CPU0       CPU1       
 //   0:         20          0   IO-APIC   2-edge      timer
 //   1:          3          0   IO-APIC   1-edge      i8042
 //   8:          1          0   IO-APIC   8-edge      rtc0
@@ -355,7 +356,7 @@ bool NextIntr(FILE* intrfile, int* intrnum, char* intrname, int len) {
     intrname[len - 1] = '\0';
     return true;
   }
-
+ 
   return false;
 }
 
@@ -365,7 +366,7 @@ void GetIrqNames(NumNamePair* irqpairs, irqname* irqnames) {
   irqpairs[0].name = NULL;
   FILE* intrfile = fopen("/proc/interrupts", "r");
   if (intrfile == NULL) {return;}
-
+  
   char intrname[GetbufSize];
   int intrnum;
   int k = 0;
@@ -383,9 +384,9 @@ void GetIrqNames(NumNamePair* irqpairs, irqname* irqnames) {
 
 #endif
 
-//--------------------------------------------------------------------------------------//
+//--------------------------------------------------------------------------------------// 
 // Common routines
-//--------------------------------------------------------------------------------------//
+//--------------------------------------------------------------------------------------// 
 
 // Kernel version is the result of command: uname -rv
 void GetKernelVersion(char* kernelversion, int len) {
@@ -456,11 +457,12 @@ u64 inline DoControl(u64 command, u64 arg)
   }
   return (rval);
 }
+
 #else
 
 // Not FreeBSD
 // These numbers must exactly match the numbers in kernel include file kutrace.h
-#define __NR_kutrace_control 1023
+#define __NR_kutrace_control 1023	
 u64 inline DoControl(u64 command, u64 arg)
 {
   return syscall(__NR_kutrace_control, command, arg);
@@ -477,7 +479,7 @@ void msleep(int msec) {
   nanosleep(&ts, NULL);
 }
 
-// Single static buffer. In real production code, this would
+// Single static buffer. In real production code, this would 
 // all be std::string value, or something else at least as safe.
 static const int kMaxDateTimeBuffer = 32;
 static char gTempDateTimeBuffer[kMaxDateTimeBuffer];
@@ -517,10 +519,10 @@ const char* MakeTraceFileName(const char* argv0, char* str) {
   int pid = getpid();
 
   sprintf(str, "%s_%s_%s_%d.trace", slash, timestr, hostnamestr, pid);
-  return str;
-}
+  return str; 
+}           
 
-// This depends on ~KUTRACE_CMD_INSERTN working even with tracing off.
+// This depends on ~KUTRACE_CMD_INSERTN working even with tracing off. 
 void InsertVariableEntry(const char* str, u64 event, u64 arg) {
   u64 temp[8];		// Up to 56 bytes
   u64 bytelen = strlen(str);
@@ -548,7 +550,7 @@ void EmitNames(const NumNamePair* ipair, u64 event) {
 
 
 
-// This depends on ~TRACE_INSERTN working even with tracing off.
+// This depends on ~TRACE_INSERTN working even with tracing off. 
 void InsertTimePair(int64 cycles, int64 usec) {
   u64 temp[8];		// Always 8 words for TRACE_INSERTN
   u64 n_with_length = KUTRACE_TIMEPAIR + (3 << 4);
@@ -570,7 +572,7 @@ bool TestModule() {
 
   if (retval > 255) {
     // Module is not loaded
-    fprintf(stderr, "KUtrace module/code not loaded\n");
+    fprintf(stderr, "KUtrace module/code not loaded or PTRACE needed or use insmod check=0\n");
     return false;
   }
   if (retval < kMinModuleVersionNumber) {
@@ -640,9 +642,9 @@ bool DoOn() {
 // Current design is two-step:
 //   one routine to capture all the info
 //   second routine to insert into trace buffer
-// We want the inserts to be fast and have no delays that might allow a process
-// migration in the *middle* of building the initial name list. Doing so will
-// confuse wraparound and my leave some events unnamed for the first few
+// We want the inserts to be fast and have no delays that might allow a process 
+// migration in the *middle* of building the initial name list. Doing so will 
+// confuse wraparound and my leave some events unnamed for the first few 
 // housand rawtoevent entries if some CPU blocks precede the remainder of
 //  the name entries.
 
@@ -663,14 +665,14 @@ void DoInit(const char* process_name) {
 
   // AHHA. These can take more than 10msec to execute. so 20-bit time can wrap,
   // and we can get migrated to another CPU while we are blocked.
-  // So we need to capture all the strings up front before creating the first trace
+  // So we need to capture all the strings up front before creating the first trace 
   // entry, and then insert all at once.
   GetKernelVersion(kernelversion, GetbufSize);
   GetModelName(modelname, GetbufSize);
   GetHostName(hostname, GetbufSize);
   GetLinkSpeed(linkspeed, GetbufSize);
   GetIrqNames(localirqpairs, irqnames);
-
+  
   GetTimePair(&start_cycles, &start_usec);	// Now OK to look at time
 
   // Start trace buffer with a little trace environment information
@@ -682,8 +684,8 @@ void DoInit(const char* process_name) {
   // Add trap/irq/syscall names into front of trace
   EmitNames(PidNames, KUTRACE_PIDNAME);
   EmitNames(TrapNames, KUTRACE_TRAPNAME);
-  EmitNames(localirqpairs, KUTRACE_INTERRUPTNAME);	// Running system interrupts 1st
-  EmitNames(IrqNames, KUTRACE_INTERRUPTNAME);		// Default interrupt names   2nd
+  EmitNames(IrqNames, KUTRACE_INTERRUPTNAME);		// Default interrupt names   1st
+  EmitNames(localirqpairs, KUTRACE_INTERRUPTNAME);	// Running system interrupts 2nd
   EmitNames(Syscall64Names, KUTRACE_SYSCALL64NAME);
   EmitNames(ErrnoNames, KUTRACE_ERRNONAME);
 
@@ -720,13 +722,13 @@ void DoReset(u64 control_flags) {
 
 // Show some sort of tracing status
 // Module must be loaded. Tracing may well be on
-// If IPC,only 7/8 of the blocks are counted:
+// If IPC,only 7/8 of the blocks are counted: 
 //  for every 64KB traceblock there is another 8KB IPCblock (and some wasted space)
 void DoStat(u64 control_flags) {
   u64 retval = DoControl(KUTRACE_CMD_STAT, 0);
   double blocksize = kTraceBufSize * sizeof(u64);
   if ((control_flags & DO_IPC) != 0) {blocksize = (blocksize * 8) / 7;}
-  fprintf(stderr, "Stat: %lld trace blocks used (%3.1fMB)\n",
+  fprintf(stderr, "Stat: %lld trace blocks used (%3.1fMB)\n", 
           retval, (retval * blocksize) / (1024 * 1024));
 }
 
@@ -755,7 +757,7 @@ typedef struct {
   double m_slope;
 } CyclesToUsecParams;
 
-void SetParams(int64 start_cycles, int64 start_usec,
+void SetParams(int64 start_cycles, int64 start_usec, 
                int64 stop_cycles, int64 stop_usec, CyclesToUsecParams* param) {
   param->base_cycles = start_cycles;
   param->base_usec = start_usec;
@@ -778,13 +780,13 @@ const char* FormatUsecDateTime(int64 us) {
   if (us == 0) {return "unknown";}  // Longer spelling: caller expecting date
   int32 seconds = us / 1000000;
   int32 usec = us - (seconds * 1000000);
-  snprintf(gTempPrintBuffer, kMaxPrintBuffer, "%s.%06d",
+  snprintf(gTempPrintBuffer, kMaxPrintBuffer, "%s.%06d", 
            FormatSecondsDateTime(seconds), usec);
   return gTempPrintBuffer;
 }
 
 void DumpTimePair(const char* label, int64 cycles, int64 usec) {
-  fprintf(stderr, "%s %016llx cy %016llx us => %s\n",
+  fprintf(stderr, "%s %016llx cy %016llx us => %s\n", 
           label, cycles, usec, FormatUsecDateTime(usec));
 }
 #endif
@@ -822,7 +824,7 @@ void DoDump(const char* fname) {
 //fprintf(stderr, "wordcount = %ld\n", wordcount);
 //fprintf(stderr, "blockcount = %ld\n", blockcount);
 
-  // If module implements 4KB transfers, use those.
+  // If module implements 4KB transfers, use those. 
   bool use_4kb = (kIpcBufSize >= k4KBSize);
   use_4kb &= (DoControl(KUTRACE_CMD_VERSION, 0) >= kMin4KBModuleVersionNumber);
 
@@ -856,19 +858,43 @@ void DoDump(const char* fname) {
 
     // traceblock[0] has cpu number and cycle counter
     // traceblock[1] has flags in top byte, then zeros
-    // We put the reconstructed getimeofday value into traceblock[1]
+    // We put the reconstructed getimeofday value into traceblock[1] 
     uint8 flags = traceblock[1] >> 56;
-    bool this_block_has_ipc = ((flags & IPC_Flag) != 0);
+    bool this_block_has_ipc = ((flags & (IPC_Flag | LLC_Flag)) != 0);
 
     bool very_first_block = (i == 0);
     if (very_first_block) {
-      // Fill in the tracefile version
+      // Fill in the tracefile version 
       traceblock[1] |= ((kTracefileVersionNumber & VERSION_MASK) << 56);
       if (!did_wrap_around) {
-        // The kernel exports the wrap flag in the first block before
+        // The kernel exports the wrap flag in the first block before 
         // it is known whether the trace actually wrapped.
         // It did not, so turn off that bit
         traceblock[1] &= ~(WRAP_Flag << 56);
+      }
+      
+      // For Arm-32, the "cycle" counter is only 32 bits at 54 MHz, so wraps about every 79 seconds.
+      // This can leave stop_cycles small by a few multiples of 4G. We do a temporary fix here
+      // for exactly 54 MHz. Later, we could find or take as input a different approximate
+      // frequency. We could also do something similar for a 40-bit counter.
+      bool has_32bit_cycles = ((start_cycles | stop_cycles) & 0xffffffff00000000llu) == 0;
+      if (has_32bit_cycles) {
+//VERYTEMP
+//fprintf(stderr, "DoDump detected 32-bit cycle counter. Should be RPi4.\n");
+        uint64 elapsed_usec = (uint64)(stop_usec - start_usec);
+        uint64 elapsed_cycles = (uint64)(stop_cycles - start_cycles);
+        uint64 expected_cycles = elapsed_usec * mhz_32bit_cycles;
+        // Pick off the expected high bits
+        uint64 approx_hi = (start_cycles + expected_cycles) & 0xffffffff00000000llu;
+        // Put them in
+        stop_cycles |= (int64)approx_hi;
+        // Cross-check and change by 1 if right at a boundary
+        // and off by more than 12.5% from expected MHz
+        elapsed_cycles = (uint64)(stop_cycles - start_cycles);
+        uint64 ratio = elapsed_cycles / elapsed_usec;
+        if (ratio > (mhz_32bit_cycles + (mhz_32bit_cycles >> 3))) {stop_cycles -= 0x0000000100000000llu;}
+        if (ratio < (mhz_32bit_cycles - (mhz_32bit_cycles >> 3))) {stop_cycles += 0x0000000100000000llu;}
+        elapsed_cycles = (uint64)(stop_cycles - start_cycles);
       }
 
       uint64 block_0_cycle = traceblock[0] & CLU(0x00ffffffffffffff);
@@ -882,7 +908,7 @@ void DoDump(const char* fname) {
       traceblock[3] = start_usec;
       traceblock[4] = stop_cycles;
       traceblock[5] = stop_usec;
-
+      
       ////DumpTimePair("start", start_cycles, start_usec);
       ////DumpTimePair("stop ", stop_cycles, stop_usec);
     }	// End of very first block
@@ -967,31 +993,31 @@ u64 DoEvent(u64 eventnum, u64 arg) {
 //                       0123456789012345678901234567890123456789
 // where the first is NUL.
 static const char kToBase40[256] = {
-   0,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,37,38,39,
-  27,28,29,30, 31,32,33,34, 35,36,38,38, 38,38,38,38,
+   0,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,37,38,39, 
+  27,28,29,30, 31,32,33,34, 35,36,38,38, 38,38,38,38, 
 
   38, 1, 2, 3,  4, 5, 6, 7,  8, 9,10,11, 12,13,14,15,
-  16,17,18,19, 20,21,22,23, 24,25,26,38, 38,38,38,38,
+  16,17,18,19, 20,21,22,23, 24,25,26,38, 38,38,38,38, 
   38, 1, 2, 3,  4, 5, 6, 7,  8, 9,10,11, 12,13,14,15,
-  16,17,18,19, 20,21,22,23, 24,25,26,38, 38,38,38,38,
+  16,17,18,19, 20,21,22,23, 24,25,26,38, 38,38,38,38, 
 
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
 
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
 };
 
 static const char kFromBase40[40] = {
   '\0','a','b','c', 'd','e','f','g',  'h','i','j','k',  'l','m','n','o',
   'p','q','r','s',  't','u','v','w',  'x','y','z','0',  '1','2','3','4',
-  '5','6','7','8',  '9','-','.','/',
+  '5','6','7','8',  '9','-','.','/', 
 };
 
 
@@ -1041,7 +1067,7 @@ void kutrace::mark_c(const char* label) {::DoMark(KUTRACE_MARKC, ::CharToBase40(
 void kutrace::mark_d(uint64 n) {::DoMark(KUTRACE_MARKD, n);}
 
 // Returns number of words inserted 1..8, or
-//   0 if tracing is off, negative if module is not not loaded
+//   0 if tracing is off, negative if module is not not loaded 
 u64 kutrace::addevent(uint64 eventnum, uint64 arg) {return ::DoEvent(eventnum, arg);}
 
 void kutrace::addname(uint64 eventnum, uint64 number, const char* name) {::addname(eventnum, number, name);}
@@ -1075,6 +1101,6 @@ const char* kutrace::MakeTraceFileName(const char* name, char* str) {
 bool kutrace::TestModule() {return ::TestModule();}
 
 
-
+ 
 
 

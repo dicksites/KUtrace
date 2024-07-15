@@ -1,16 +1,26 @@
 /*
- * kutrace_mod.c
+ * kutrace_mod_llc.c
  *
  * Author: Richard Sites <dick.sites@gmail.com>
  *
- * SPDX-License-Identifier: GPL-2.0
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * Signed-off-by: Richard Sites <dick.sites@gmail.com>
  */
 
 /*
  * A module that implements kernel/user tracing
- * dsites 2023.02.18
+ * dsites 2024.05.29
  *
  * See include/linux/kutrace.h for struct definitions
  *
@@ -34,11 +44,16 @@
  * dsites 2023.02.13 Change module version number to 4
  * dsites 2023.02.16 Merge in TSDELTA code from FreeBSD version
  *
+ * dsites 2023.06.22 Trace LLC misses instead of IPC per timespan
+ * dsites 2023.06.25 Extend LLC range by 4x
+ * dsites 2024.05.29 Combine to do either/both IPC and LLC
+ *
  */
 
 #include <linux/kutrace.h>
 
 #include <linux/capability.h>
+#include <linux/compiler.h>	/* for unlikely() */
 #include <linux/cpufreq.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -76,7 +91,7 @@ MODULE_AUTHOR("Richard L Sites");
 #define KUTRACE_TSDELTA         0x21D  /* Delta to advance timestamp */
 #endif
 
-
+/* int hack_count = 0; */
 
 // GCC compiler options to distinguish build targets
 // Use to get these:
@@ -137,6 +152,7 @@ MODULE_AUTHOR("Richard L Sites");
 /*   Volume 4: Model-Specific Registers */
 
 /* rdtsc counts cycles, no setup needed */
+
 /* IA32_FIXED_CTR0 counts instructions retired, once set up */
 #define IA32_FIXED_CTR0		0x309
 #define IA32_FIXED_CTR_CTRL	0x38D
@@ -147,6 +163,37 @@ MODULE_AUTHOR("Richard L Sites");
 #define EN0_ALL			(EN0_OS | EN0_Usr | EN0_Anythread | EN0_PMI)
 #define IA32_PERF_GLOBAL_CTRL	0x38F
 #define EN_FIXED_CTR0		(1L << 32)
+
+/* IA32_PMC1 counts LLC misses (L3 cache), once set up */
+/* Constants for reading LLC_MISS */
+#define IA32_PERFEVTSEL0 	0x186
+#define IA32_PERFEVTSEL1 	0x187
+#define IA32_PERFEVTSEL2 	0x188
+#define IA32_PERFEVTSEL3 	0x189
+#define PMC_USR_EN		(1 << 16)
+#define PMC_OS_EN		(1 << 17)
+#define PMC_EDGE		(1 << 18)
+#define PMC_PINCTRL		(1 << 19)
+#define PMC_INT_EN		(1 << 20)
+#define PMC_EN			(1 << 22)
+#define PMC_INV			(1 << 23)
+#define PMC_BITS		(0xFF << 16)
+
+#define C_LLC_MISS		(0x00 << 24)
+#define U_LLC_MISS		(0x41 << 8)
+#define E_LLC_MISS		(0x2E << 0)
+
+#define C_INST_RET		(0x00 << 24)
+#define U_INST_RET		(0x00 << 8)
+#define E_INST_RET		(0xC0 << 0)
+
+#define IA32_PMC0		0x0C1
+#define IA32_PMC1		0x0C2
+
+
+/* #define IA32_PERF_GLOBAL_CTRL	0x38F */
+#define PMC0_EN			(1L << 0)
+#define PMC1_EN			(1L << 1)
 
 /* MSR_IA32_PERF_STATUS<15:8> gives current CPU frequency in increments of 100 MHz */
 #define MSR_PERF_STATUS		0x198
@@ -206,13 +253,15 @@ typedef long unsigned int uint64;
 static u64 kutrace_control(u64 command, u64 arg);
 static int __init kutrace_mod_init(void);
 
-/* For the flags byte in traceblock[1] */
-#define IPC_Flag CLU(0x80)
-#define WRAP_Flag CLU(0x40)
-
-/* Incoming arg to do_reset  */
+/* Incoming arg to do_reset from kutrace_control  */
 #define DO_IPC 1
 #define DO_WRAP 2
+#define DO_LLC 4
+
+/*Outgoing flags byte in each traceblock[1] */
+#define IPC_Flag CLU(0x80)
+#define WRAP_Flag CLU(0x40)
+#define LLC_Flag CLU(0x20)
 
 /* Module parameter: default how many MB of kernel trace memory to reserve */
 /* This is for the standalone, non-module version */
@@ -228,6 +277,13 @@ static const u64 kModuleVersionNumber = 4;
 /* IPC Instructions per cycle flag */
 static bool do_ipc;	/* Initially false */
 
+/* LLC cache misses flag */
+static bool do_llc;	/* Initially false */
+
+static bool do_neither;		/* !do_ipc and !do_llc */
+static bool do_both;		/* do_ipc and do_llc */
+static bool do_ipc_only;	/* do_ipc and !do_llc */
+
 /* Wraparound tracing vs. stop when buffer is full */
 static bool do_wrap;	/* Initially false */
 
@@ -237,7 +293,7 @@ static u64 get4kb_subscr;	/* Initially zero */
 
 /* Module parameter: default how many MB of kernel trace memory to reserve */
 static long int tracemb = 2;
-static long int check = 1;
+static long int check = 1;	/* require PTRACE permission by default */
 
 /* Module parameters: packet filtering. Initially match just dclab RPC markers */
 static long int pktmask  = 0x0000000f;
@@ -338,7 +394,6 @@ DECLARE_PER_CPU(struct kutrace_traceblock, kutrace_traceblock_per_cpu);
 /* with backward time. */
 static const u64 kLateStoreThresh = 0x00000000000e0000LLU;
 
-
 /*
  * Trace memory is consumed backward, high to low
  * This allows valid test for full block even if an interrupt routine
@@ -356,7 +411,7 @@ u64 *traceblock_next;		/* starts at high, moves down to limit */
 bool did_wrap_around;
 
 /*
- * Trace memory layout without IPC tracing.
+ * Trace memory layout without IPC/LLC tracing.
  *  tracebase
  *  traceblock_limit          traceblock_next                traceblock_high
  *  |                               |                                |
@@ -367,7 +422,7 @@ bool did_wrap_around;
  *                                  <==== allocated blocks grow down
  *
  *
- * Trace memory layout with IPC tracing. IPC bytes go into lower 1/8.
+ * Trace memory layout with IPC/LLCtracing. IPC/LLC bytes go into lower 1/8.
  *  tracebase
  *  |    traceblock_limit     traceblock_next                traceblock_high
  *  |       |                       |                                |
@@ -376,7 +431,7 @@ bool did_wrap_around;
  *  |////|  | / / / / / / / / / / / |                               |
  *  +-------+-------+------+--------+-------+-------+-------+-------+
  *       <==                        <==== allocated blocks grow down
- *       IPC bytes
+ *       IPC/LLC bytes
  */
 
 DEFINE_RAW_SPINLOCK(kutrace_lock);
@@ -389,7 +444,7 @@ DEFINE_RAW_SPINLOCK(kutrace_lock);
 #define KUTRACEBLOCKSHIFTU64 (KUTRACEBLOCKSHIFT - 3)
 #define KUTRACEBLOCKSIZEU64 (1 << KUTRACEBLOCKSHIFTU64)
 
-/* IPC block size in u8 bytes */
+/* IPC/LLC block size in u8 bytes */
 #define KUIPCBLOCKSHIFTU8 (KUTRACEBLOCKSHIFTU64 - 3)
 #define KUIPCBLOCKSIZEU8 (1 << KUIPCBLOCKSHIFTU8)
 
@@ -402,13 +457,16 @@ static const u64 kIpcMapping[64] = {
   15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15
 };
 
-
+/* Just pick off 0, 8, 64, 1024 misses (0,512,4K,32K+) for 2 bits */
+static const u64 kLlcSmall[16] = {
+  0,0,1,1, 1,2,2,2, 3,3,3,3, 3,3,3,3 
+};
 
 /* Map IPC= inst_retired / cycles to sorta-log four bits */
 /* NOTE: delta_cycles is in increments of cycles/64. The arithmetic */
 /*       below compensates for this. */
 /* 0, 1/8, 1/4, 3/8,  1/2, 5/8, 3/4, 7/8,  1, 5/4, 3/2, 7/4,  2, 5/2, 3, 7/2 */
-inline u64 get_granular(u64 delta_inst, u64 delta_cycles) {
+inline u64 get_granular_ipc(u64 delta_inst, u64 delta_cycles) {
   u32 del_inst, del_cycles, ipc;
   if ((delta_cycles & ~1) == 0) return 0; /* Too small to matter; avoid zdiv */
   /* Do 32-bit divide to save ~10 CPU cycles vs. 64-bit */
@@ -416,8 +474,9 @@ inline u64 get_granular(u64 delta_inst, u64 delta_cycles) {
   del_inst = (u32)delta_inst;
 
 #if IsRPi4_64
-  /* "cycle" counter is 54MHz, cycles are 1500 MHz, so one count = 1500/54 = 27.778 cycles */
-  /* Call it 28 (less than 1% error). To get 8*inst/cycles for the divide below, we mul by 8/28 = 2/7 */
+  /* "cycle" counter is 54MHz, cycles are 1500 MHz, */
+  /* so one count = 1500/54 = 27.778 cycles. Call it 28 (less than 1% error). */
+  /* To get 8*inst/cycles for the divide below, we mul by 8/28 = 2/7 */
   del_inst *= 2;
   del_cycles = (u32)(delta_cycles * 7);   /* cycles/28 to cycles/4 */
 #else
@@ -426,6 +485,38 @@ inline u64 get_granular(u64 delta_inst, u64 delta_cycles) {
 
   ipc = del_inst / del_cycles;	          /* gives IPC*8 */
   return kIpcMapping[ipc & 0x3F];	  /* Truncate unexpected IPC >= 8.0 */
+}
+
+/*  
+ * Convert delta LLC miss count into floor(log2(delta))-1 for 8 <= delta < 64K
+ *   i.e. 0=>0 1..7=>1, 8..15=>2, 16..31=>3 ... 32K..64K-1=>14 64K+=>15
+ * Note that we map 2**0, 2**1, and 2**2 all to the same result, using the
+ * missing two code points instead to extend our range to 64K+ misses 
+ * (i.e. 4MB with 64-byte cache lines)
+ */
+inline u64 get_granular_llc(u64 delta_llc) {
+  u64 retval;
+  if (delta_llc == 0) return 0;			/* common case, we hope */
+  if ((delta_llc & ~CLU(0x7)) == 0) return 1;		/* 1..7 */
+  if ((delta_llc & ~CLU(0xFFFF)) != 0) return 15;	/* 64K+ */ 
+  /* 1 + floor(log2(delta)) */
+  retval = 0;
+  if ((delta_llc & CLU(0xFF00)) != 0) {
+    delta_llc >>= 8;
+    retval += 8;
+  }
+  if ((delta_llc & CLU(0x00F0)) != 0) {
+    delta_llc >>= 4;
+    retval += 4;
+  }
+  if ((delta_llc & CLU(0x000C)) != 0) {
+    delta_llc >>= 2;
+    retval += 2;
+  }
+  if ((delta_llc & CLU(0x0002)) != 0) {
+    retval += 1;
+  }
+  return retval - 1;
 }
 
 
@@ -519,6 +610,31 @@ void ku_setup_inst_retired(void)
 #endif
 }
 
+/* Set up global state for reading instructions retired */
+/* This needs to run once on each CPU core */
+void ku_setup_llc_miss(void)
+{
+#if IsIntel_64
+	u64 llc_miss_sel;
+	u64 llc_miss_enable;
+	/* Count LLC_MISS, both user and os; enable counting */
+	/* llc_miss_sel = rdMSR(IA32_PERFEVTSEL1); */
+	llc_miss_sel = (PMC_USR_EN | PMC_OS_EN | PMC_EN) |
+	  (C_LLC_MISS | U_LLC_MISS | E_LLC_MISS);
+	wrMSR(IA32_PERFEVTSEL1, llc_miss_sel);
+	
+	/* Enable fixed llc_miss counter in IA32_PERF_GLOBAL_CTRL */
+	llc_miss_enable = rdMSR(IA32_PERF_GLOBAL_CTRL);
+	llc_miss_enable |= PMC1_EN;
+	wrMSR(IA32_PERF_GLOBAL_CTRL, llc_miss_enable);
+#else
+	/* Not implemented for AMD, RPi */
+#error Define ku_setup_llc_miss for your architecture
+
+#endif
+}
+
+
 /* Set up global state for reading CPU frequency */
 /* This needs to run once on each CPU core */
 void ku_setup_cpu_freq(void)
@@ -585,6 +701,23 @@ inline u64 ku_get_inst_retired(void)
 
 }
 
+/* Read LLC misses counter */
+/* This is performance critical -- every trace entry if tracking LLC */
+/*----------------------------------------------------------------------------*/
+inline u64 ku_get_llc_miss(void)
+{
+#if IsIntel_64
+	u32 a = 0, d = 0;
+	int ecx = IA32_PMC1;		/* What counter it selects, Intel */
+	__asm __volatile("rdmsr" : "=a"(a), "=d"(d) : "c"(ecx));
+	return ((u64)a) | (((u64)d) << 32);
+#else
+	/* Not implemented for AMD, RPi */
+#error Define llc_miss for your architecture
+	return 0;
+#endif
+}
+
 /* Read current CPU frequency */
 /* Not performance critical -- once every timer interrupt                     */
 /*----------------------------------------------------------------------------*/
@@ -618,7 +751,6 @@ inline u64 ku_get_cpu_freq(void) {
 inline bool LateStoreOrLarge(u64 delta_cycles) {
   return delta_cycles > kLateStoreThresh;
 }
-
 
 /* Make sure name length fits in 1..8 u64's */
 //* Return true if out of range */
@@ -877,10 +1009,13 @@ static u64 *initialize_trace_block(u64 *init_me, bool very_first_block,
 
 	/* Second word is going to be corresponding gettimeofday(), */
 	/* filled in via postprocessing */
-	/* We put some flags in the top byte, though. x080 = do_ipc bit */
+	/* We put some flags in the top byte, though. 0x80 = do_ipc bit, etc. */
+	/* NOTE: This could all be pre-calculated in do_reset() */
 	init_me[1] = 0;
 	if (do_ipc)
 		init_me[1] |= (IPC_Flag << FLAGS_SHIFT);
+	if (do_llc)
+		init_me[1] |= (LLC_Flag << FLAGS_SHIFT);
 	if (do_wrap)
 		init_me[1] |= (WRAP_Flag << FLAGS_SHIFT);
 	/* We don't know if we actually wrapped until the end. */
@@ -888,7 +1023,7 @@ static u64 *initialize_trace_block(u64 *init_me, bool very_first_block,
 
 	/* For very first trace block, also insert six NOPs at [2..7]. */
 	/* The dump to disk code will overwrite the first pair with */
-	/* start timepair and the next with stop timepair. [6..7] unused */
+	/* start timepair and the next with stop timepair. [6..7] currently unused */
 	if (very_first_block) {
 		init_me[2] = CLU(0);
 		init_me[3] = CLU(0);
@@ -929,6 +1064,7 @@ static u64 *initialize_trace_block(u64 *init_me, bool very_first_block,
 		if (first_block_per_cpu) {
 			ku_setup_timecount();
 			ku_setup_inst_retired();
+			ku_setup_llc_miss();
 			ku_setup_cpu_freq();
 			tb->prior_cycles = 1;	/* mark it as initialized */
 #if IsRPi4_64
@@ -1002,7 +1138,7 @@ static u64 *get_slow_claim(int len, struct kutrace_traceblock *tb)
 	u64 *limit_item;
 	u64 *myclaim = NULL;
 
-	if (is_bad_len(len)) {
+	if (unlikely(is_bad_len(len))) {
 		kutrace_tracing = false;
 printk(KERN_INFO "is_bad_len 1\n");
 		return NULL;
@@ -1042,7 +1178,7 @@ static u64 *get_claim(int len, struct kutrace_traceblock* tb)
 	u64 *limit_item_again = NULL;
 	u64 *myclaim = NULL;
 
-	if (is_bad_len_plus(len)) {
+	if (unlikely(is_bad_len_plus(len))) {
 		kutrace_tracing = false;
 		return NULL;
 	}
@@ -1059,7 +1195,7 @@ static u64 *get_claim(int len, struct kutrace_traceblock* tb)
 	/* If they are, take the slow path without accessing. */
 	do {
 		limit_item = tb->limit;
-		if (limit_item == NULL)
+		if (unlikely(limit_item == NULL))
 			break;
 
 		/* add_return returns the updated pointer; we want the */
@@ -1079,7 +1215,7 @@ static u64 *get_claim(int len, struct kutrace_traceblock* tb)
 	} while (true);
 
 	/* Make sure the entire allocation fits */
-	if ((myclaim + len) >= limit_item_again) {
+	if (unlikely((myclaim + len) >= limit_item_again)) {
 	    /* Either this is the first claim for a CPU */
 	    /*   with limit_item, limit_item_again, and myclaim all null, or */
 		/* the claim we got doesn't fit in its block. Allocate a new block. */
@@ -1117,7 +1253,7 @@ inline u64* get_claim_with_tsdelta(u64 now, u64 delta_cycles,
                                    int len, struct kutrace_traceblock* tb) {
 	u64 *claim;
 	/* Check if time between events almost wraps above the 20-bit timestamp */
-	if (LateStoreOrLarge(delta_cycles) && (tb->prior_cycles != 0)) {
+	if (unlikely(LateStoreOrLarge(delta_cycles) && (tb->prior_cycles != 0))) {
 		/* Uncommon case. Add timestamp delta entry before original entry */
 		claim = get_claim(1 + len, tb);
 		if (claim != NULL) {
@@ -1143,35 +1279,60 @@ inline static u64 *get_prior(struct kutrace_traceblock *tb)
 	/* Note that next and limit may both be NULL at initial use. */
 	/* If they are, or any other problem, return NULL */
 	/* get_cpu_var disables preempt */
-	tb = &get_cpu_var(kutrace_traceblock_per_cpu);
+////	tb = &get_cpu_var(kutrace_traceblock_per_cpu);
 	next_item = (u64 *)ATOMIC_READ(&tb->next);
 	limit_item = tb->limit;
-	put_cpu_var(kutrace_traceblock_per_cpu);
+////	put_cpu_var(kutrace_traceblock_per_cpu);
 
 	if (next_item < limit_item)
 		return next_item - 1;	/* ptr to prior entry */
 	return NULL;
 }
 
-/* Calculate and insert four-bit IPC value. Shift puts in lo/hi part of a byte */
-inline void do_ipc_calc(u64 *claim, u64 delta_cycles, 
+/* Calculate and insert 4-bit IPC/LLC value. Shift packs in hi part of a byte */
+/* If either IPC or LLC is on, store its quantized 4-bit value */
+/* If both are on keep just high two bits of each. HTML wrapper displays both */
+/* Prioritize do_ipc */
+inline void do_ipcllc_calc(u64 *claim, u64 delta_cycles, 
                         struct kutrace_traceblock* tb, bool shift) {
-        u64 inst_ret;
-		u64 delta_inst;
-		u64 ipc;
-		u8* ipc_byte_addr;
-		if (!do_ipc) {return;}
-		/* There will be random large differences the first time; we don't care. */
+        u64 inst_ret, delta_inst, ipc;
+	u64 llc_miss, delta_miss, llc;
+	u64 four_bits;	/* To store into trace: ipc, llc, or two bits of each */
+	u8* ipcllc_byte_addr;
+	
+	/* There will be random large differences the first time; we don't care. */
+	if (do_ipc_only) {
 		inst_ret = ku_get_inst_retired();
 		delta_inst = inst_ret - tb->prior_inst_retired;
 		tb->prior_inst_retired = inst_ret;
-		/* NOTE: pointer arithmetic divides claim by 8, giving the byte offset we want */
-		ipc_byte_addr = (u8*)(tracebase) + (claim - (u64*)(tracebase));
-		ipc = get_granular(delta_inst, delta_cycles);
-		if (shift)
-				ipc_byte_addr[0] |= ipc << 4;
-		else
-				ipc_byte_addr[0] = ipc;
+		four_bits = get_granular_ipc(delta_inst, delta_cycles);
+	}
+	else if (do_neither) {
+		return;
+	}
+	else if (do_llc) {
+		llc_miss = ku_get_llc_miss();
+		delta_miss = llc_miss - tb-> prior_llc_misses;
+		tb->prior_llc_misses = llc_miss;
+		four_bits = llc = get_granular_llc(delta_miss);
+		if (do_both) {
+			inst_ret = ku_get_inst_retired();
+			delta_inst = inst_ret - tb->prior_inst_retired;
+			tb->prior_inst_retired = inst_ret;
+			ipc = get_granular_ipc(delta_inst, delta_cycles);
+			/* Pack upper two bits only of each counter */
+			four_bits = (ipc & 0x0c) | kLlcSmall[llc];
+		}
+	}
+
+	/* NOTE: pointer arithmetic divides claim by 8, giving the byte offset */
+	ipcllc_byte_addr = (u8*)(tracebase) + (claim - (u64*)(tracebase));
+	/* Shift saves the value for optimized returns in high 4 bits of byte */
+	if (shift)
+		ipcllc_byte_addr[0] |= four_bits << 4;
+	else
+		ipcllc_byte_addr[0] = four_bits;
+/* if(++hack_count < 20)  printk(KERN_INFO "  byte %u\n", ipcllc_byte_addr[0]); */
 }
 
 
@@ -1200,10 +1361,10 @@ static u64 insert_1(u64 arg1)
 	claim = get_claim_with_tsdelta(now, delta_cycles, 1, tb);
 	/* This update must be after the first getclaim per CPU */
 	tb->prior_cycles = now;
-	if (claim != NULL) {
+	if (likely(claim != NULL)) {
 		claim[0] = arg1 | (now << TIMESTAMP_SHIFT);
-		/* IPC option. Changes CPU overhead from ~1/4% to ~3/4% */
-		do_ipc_calc(claim, delta_cycles, tb, false);
+		/* IPC/LLC option. Changes CPU overhead from ~1/4% to ~3/4% */
+		do_ipcllc_calc(claim, delta_cycles, tb, false);
 		retval = 1;
 	}
 	put_cpu_var(kutrace_traceblock_per_cpu);	/* release preempt */
@@ -1226,7 +1387,7 @@ static u64 insert_1_retopt(u64 arg1)
 	/* It doesn't matter if we get migrated because we are not allocating a new entry */
 	tb = &get_cpu_var(kutrace_traceblock_per_cpu);	/* hold off preempt */
 	prior_entry = get_prior(tb);
-	if (prior_entry != NULL) {
+	if (likely(prior_entry != NULL)) {
 		/* Want N=matching call, high bytes of return value = 0 */
 		u64 diff = (*prior_entry ^ arg1) & EVENT_DELTA_RETVAL_MASK;
 		u64 prior_t = *prior_entry >> TIMESTAMP_SHIFT;
@@ -1238,14 +1399,14 @@ static u64 insert_1_retopt(u64 arg1)
 			/* This happens about 90-95% of the time */
 			u64 opt_ret;
 			/* make sure delta_t is nonzero to flag there is an optimized ret */
-			if (delta_t == 0)
+			if (unlikely(delta_t == 0))
 				delta_t = 1;
 			opt_ret = (delta_t << DELTA_SHIFT) |
 				((arg1 & UNSHIFTED_RETVAL_MASK) << RETVAL_SHIFT);
 			*prior_entry |= opt_ret;
 			
-			/* IPC option. Changes CPU overhead from ~1/4% to ~3/4% */
-			do_ipc_calc(prior_entry, delta_t, tb, true);	
+			/* IPC/LLC option. Changes CPU overhead from ~1/4% to ~3/4% */
+			do_ipcllc_calc(prior_entry, delta_t, tb, true);		
 			put_cpu_var(kutrace_traceblock_per_cpu);	/* release preempt */
 			return 0;
 		}
@@ -1390,12 +1551,17 @@ static u64 insert_n_user(u64 word)
 static u64 do_reset(u64 flags)
 {
 	int cpu;
+/* hack_count = 0; */
 
 	/* printk(KERN_INFO "  kutrace_trace reset(%016llx) called\n", flags); */
 	/* Turn off tracing -- should already be off */
 	kutrace_tracing = false;	/* Should already be off */
 	do_ipc = ((flags & DO_IPC) != 0);
+	do_llc = ((flags & DO_LLC) != 0);
 	do_wrap = ((flags & DO_WRAP) != 0);
+	do_neither = (!do_ipc) & (!do_llc);
+	do_both = (do_ipc & do_llc);
+	do_ipc_only = (do_ipc & !do_llc);
 
 	/* Clear pid filter */
 	memset(kutrace_pid_filter, 0, 1024 * sizeof(u64));
@@ -1407,7 +1573,7 @@ static u64 do_reset(u64 flags)
 	traceblock_next = traceblock_high;	
 	did_wrap_around = false;
 
-	if (do_ipc) {
+	if (do_ipc | do_llc) {
 		/* Reserve lower 1/8 of trace buffer for IPC bytes */
 		/* Strictly speaking, this should be 1/9. We waste a little space. */
 		traceblock_limit = (u64*)(tracebase + (tracemb << (20 - 3)));
@@ -1423,8 +1589,9 @@ static u64 do_reset(u64 flags)
 
 		ATOMIC_SET(&tb->next, (uintptr_t)NULL);
 		tb->limit = NULL;
-		tb->prior_cycles = 0;		// IPC design
-		tb->prior_inst_retired = 0;	// IPC design
+		tb->prior_cycles = 0;		// Cycle tracking
+		tb->prior_inst_retired = 0;	// IPC tracking
+		tb->prior_llc_misses = 0;	// LLC tracking
 	}
 
 	return 0;
@@ -1436,14 +1603,14 @@ static u64 do_reset(u64 flags)
 /*  arg fits in 16 bits for syscall/ret and 32 bits otherwise */
 static /*asmlinkage*/ void trace_1(u64 event, u64 arg)
 {
-        if (!kutrace_tracing)
-		return;
+////        if (!kutrace_tracing)
+////		return;
 
 	/* Check for possible return optimization */
 	if (((event & UNSHIFTED_EVENT_RETURN_BIT) != 0) &&
 		((event & UNSHIFTED_EVENT_HAS_RETURN_MASK) != 0))
 	{
-		/* We have a return entry 011x, 101x, 111x: 6/7, a/b, e/f */
+		/* We have a return event 011x, 101x, 111x: 6/7, a/b, e/f */
 		if (((arg + 128l) & ~UNSHIFTED_RETVAL_MASK) == 0) {
 			/* Signed retval fits into a byte, [-128..127] */
 			insert_1_retopt((event << EVENT_SHIFT) | arg);
@@ -1636,9 +1803,10 @@ static int __init kutrace_mod_init(void)
 
 	/* Set up global tracing data state */
 	/* Very first traceblock alloc per CPU will do this, but we need */
-	/* the timecount set up before we write teh first trace entry */
+	/* the timecount set up before we write the first trace entry */
 	ku_setup_timecount();
 	ku_setup_inst_retired();
+	ku_setup_llc_miss();
 	ku_setup_cpu_freq();
 	do_reset(0);
 	printk(KERN_INFO "  kutrace_tracing = %d\n", kutrace_tracing);
@@ -1676,8 +1844,9 @@ static void __exit kutrace_mod_exit(void)
 		printk(KERN_INFO "  kutrace_traceblock_per_cpu[%d] = NULL\n", cpu);
 		ATOMIC_SET(&tb->next, (uintptr_t)NULL);
 		tb->limit = NULL;
-		tb->prior_cycles = 0;		// IPC design
-		tb->prior_inst_retired = 0;	// IPC design
+		tb->prior_cycles = 0;		// Cycle tracking
+		tb->prior_inst_retired = 0;	// IPC tracking
+		tb->prior_llc_misses = 0;	// LLC tracking
 	}
 
 	traceblock_high = NULL;

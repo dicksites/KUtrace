@@ -1,5 +1,5 @@
 // Little program to turn input strings into base40 values
-// Copyright 2021 Richard L. Sites
+// dsites 2017.12.07
 //
 // compile with g++ -O2 base40.cc -o base40
 //
@@ -13,7 +13,6 @@
 #define BASE40__zero 39561079	// "/zero"
 
 
-#include <iostream>
 #include <stdio.h>
 #include <string.h>
 
@@ -27,31 +26,31 @@ typedef unsigned long int u64;
 //                       0123456789012345678901234567890123456789
 // where the first is NUL.
 static const char kToBase40[256] = {
-   0,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,37,38,39,
-  27,28,29,30, 31,32,33,34, 35,36,38,38, 38,38,38,38,
+   0,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,37,38,39, 
+  27,28,29,30, 31,32,33,34, 35,36,38,38, 38,38,38,38, 
 
   38, 1, 2, 3,  4, 5, 6, 7,  8, 9,10,11, 12,13,14,15,
-  16,17,18,19, 20,21,22,23, 24,25,26,38, 38,38,38,38,
+  16,17,18,19, 20,21,22,23, 24,25,26,38, 38,38,38,38, 
   38, 1, 2, 3,  4, 5, 6, 7,  8, 9,10,11, 12,13,14,15,
-  16,17,18,19, 20,21,22,23, 24,25,26,38, 38,38,38,38,
+  16,17,18,19, 20,21,22,23, 24,25,26,38, 38,38,38,38, 
 
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
 
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
-  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38,
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
+  38,38,38,38, 38,38,38,38, 38,38,38,38, 38,38,38,38, 
 };
 
 static const char kFromBase40[40] = {
   '\0','a','b','c', 'd','e','f','g',  'h','i','j','k',  'l','m','n','o',
   'p','q','r','s',  't','u','v','w',  'x','y','z','0',  '1','2','3','4',
-  '5','6','7','8',  '9','-','.','/',
+  '5','6','7','8',  '9','-','.','/', 
 };
 
 // Unpack six characters from 32 bits.
@@ -95,18 +94,19 @@ static const int kBuffersize = 128;
 static const char* kAllowed = "_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 int main (int argc, const char** argv) {
+  char buffer[kBuffersize];
   char buffer2[kBuffersize];
-  std::string label, closing_label;
-  while (std::cin >> label) {
-    closing_label = "/" + label;
-    for (int i = 0; i < label.length(); i++) {
-      buffer2[i] = (strchr(kAllowed, label[i]) != NULL) ? label[i] : '_';
+  while (fgets(buffer, kBuffersize, stdin) != NULL) {
+    if (buffer[strlen(buffer) - 1] == '\n') {buffer[strlen(buffer) - 1] = '\0';}
+    if (buffer[strlen(buffer) - 1] == '\r') {buffer[strlen(buffer) - 1] = '\0';}
+    for (int i = 0; i < strlen(buffer); ++i) {
+      buffer2[i] = (strchr(kAllowed, buffer[i]) != NULL) ? buffer[i] : '_';
     }
-    buffer2[label.length()] = '\0';
+    buffer2[strlen(buffer)] = '\0';
     //printf("%ld // %s\n", CharToBase40(buffer), buffer);
-    printf("#define BASE40_%s  %ld    // \"%s\"\n", buffer2, CharToBase40(label.c_str()), label.c_str());
-    printf("#define BASE40__%s %ld  // \"%s\"\n", buffer2, CharToBase40(closing_label.c_str()), closing_label.c_str());
+    printf("#define BASE40_%s %ld\t// \"%s\"\n", buffer2, CharToBase40(buffer), buffer);
   }
+
   return 0;
 }
 
