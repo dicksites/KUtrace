@@ -1,0 +1,18 @@
+This directory contains HTML files for all the complex figures in the book.
+Most are KUtrace timelines, but some are disk or RPC timelines.
+
+For the KUtrace timelines, click on the figure number button(s) at the lower
+left to pan and zoom to the corresponding timespan and display options. In a
+few of the diagrams you will also need to hit <CR> in the pre-populated search 
+box to show the hits. 
+
+For the disk and RPC timelines, you will need to drag and mousewheel zoom 
+yourself to get to the right timespan and vertical position. For most of the RPC
+timelines, chick the Method button once to get the Server display colors. Also
+use the Rel0 button as appropriate to line up all RPCs at the left.
+
+Note that figure 7.3 is in a chapter 6 file and 24.6 in a chapter 23 file.
+
+Once you reach a display corresponding to a book static picture, you can pan 
+and zoom around to see more or less of the surrounding context and use the 
+display buttons to add or subtract detail.
