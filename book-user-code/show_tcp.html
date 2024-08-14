@@ -1,0 +1,854 @@
+<html>
+<meta charset="UTF-8">
+<!-- Copyright 2021 Richard L. Sites -->
+
+
+<!-- 
+  -- by Dick Sites 2017.09.29
+  --
+  -- Actions you can do:
+  --  drag/zoom with mouse and wheel
+  --    to minimize clutter, seconds, msec and usec are moved into basetime at the lower left as you zoom
+  --  click on red dot lower left to reset to original view
+  --
+  --  shift-click on an item to see what it is:
+  --    idle: black line
+  --    user-mode: half-high stacked two lines, colored by by pid
+  --    kernel-mode: full-high by overlaid two lines plus background color 
+  --      green=syscall, blue=interrupt, red=trap
+  --    red sine wave shows approximate C-state exit time from mwait power saving
+  --  releasing click first erases annotation   
+  --  releasing shift first leaves annotation on screen
+  --  shift-click-drag to annotate start and stop items, with time between shown; release behavior above
+  --
+  --  File: input box takes the name of an input json file.
+  --
+  --  two size buttons at top center set fixed-size display within current browser window 
+  --    (may be useful for creating publication pictures) 
+  --  dragging browser window edges also resizes
+  --  
+  --  Annotate button toggles labelling everything on the screen; most useful when zoomed in a lot
+  --  User-mode button toggles labelling just the first instance of each user-mode process name
+  --  search input box labels everything on the screen that matches the search string; full javascript regex
+  --    for example, search-box text for annotating for all items without "page" or "bash"
+  --      ^((?!(page)|(bash)).)*$
+  --
+  -- Initial zoom/drag is a bit slow with more than about 10000 events on the screen.
+  -- Local timer interupts occur every 4 msec on all CPUs
+  --
+  -->
+
+<meta charset="UTF-8">
+ 
+<head>
+ 
+<style> /* set the CSS */
+ 
+.rubberline {
+  fill: none;
+  stroke: #AA00FF;
+  stroke-width: 2px;
+}
+ 
+.rubbertext {
+  text-anchor: middle;
+  font-family: sans-serif; 
+  fill: #AA00FF;
+}
+ 
+.graphline {
+  fill: none;
+  stroke: steelblue;
+  stroke-width: 2px;
+}
+ 
+/* .axis { font-size: 12px; } */
+.tick { font-size: 15px; font-family: sans-serif; }
+ 
+/* .axis-text { font-size: 30px;  fill: red; } */
+/* .axis-text { font-size: 18px; font-family: sans-serif; } */
+ 
+</style>
+ 
+ 
+<!-- Load the d3.js library -->    	
+<!-- selfcontained0 -->
+<script src="https://d3js.org/d3.v4.min.js"></script>
+
+
+<script type="text/javascript">
+<!-- selfcontained1 -->
+
+
+//var initialBasetime = 36660; 	// 10:11:00 = 10*3600 + 11*60 + 0 = 36000 + 660 = 66660
+var initialBasetime = 0; 
+ 
+var basetime = initialBasetime;	
+ 
+// Callback when new json file isloaded
+function newdata(data) {
+  console.log("newdata:", data);
+}
+
+// Use new data
+function newdata2(data2) {
+  console.log("newdata2:", data2.points.length);
+ 
+  // format the data
+  data2.points.forEach(function(d) {
+      d[0] = d[0] * data2.shortMulX;
+      d[1] = d[1] * data2.shortMulY;
+      d[2] = d[2] * data2.shortMulY;
+  });
+ 
+  data = data2;
+  // Remove the 999.0 marker at the end
+  data.points.pop();
+  data2 = [];
+};
+
+function newdata2_resize(data2) {
+  if (data2 == null) {
+    data2 = dummyData;
+  }
+  newdata2(data2);
+  resize();
+}
+ 
+//creates a listener for when you press a key
+window.onkeyup = keyup;
+ 
+function keyup(e) {
+  // Setting your input text to the global Javascript Variable for every key press
+  inputTextValue = e.target.value;
+ 
+  // Listens for you to press the ENTER key, at which point your web address will change to the one you have input in the search box
+  if (e.keyCode == 13) {
+    if (inputTextValue.substr(0,4) != "http") {
+      inputTextValue = "http://127.0.0.1:8000/" + inputTextValue;
+    }
+    console.log("inputTextValue:", inputTextValue);
+    d3.json(inputTextValue, newdata2_resize);
+    //d3.json(inputTextValue, function(ddd) {console.log("ddd:", ddd);});
+  }
+}
+ 
+ 
+</script>
+ 
+</head>
+ 
+ 
+ 
+<body>
+File: <input name="FileName" type="text" maxlength="256" id="FileName" class="Filename" style="width: 300px"/> 
+<button id="size720">720x1280</button>
+<button id="size900">900x1600</button>
+<!-- <button id="resetzoom">Reset</button> -->
+<br>
+ 
+<div>
+</div>
+ 
+<script>
+// Set the initial margins of the SVG area
+var winMargin = {width: 10, height: 40};		// Room for borders and File: box
+ 
+// Set the initial margins of the graph
+var margin = {top: 20, right: 20, bottom: 50, left: 70};
+ 
+// Set the initial sizes of text
+var textsize = {tick: 16, smalltick: 12, label: 20, title: 32};
+ 
+// Variable-size design
+ 
+// To snap to nearest point, we have mouse point x,y scaled to data units and data array.
+// Taking advantage of data being sorted by x value, we use bisect (binary search) to find a nearby point
+// Then refine based on two nearby points to see closest x** + y**2. 
+// Or not bother and just use closest x. Smap x1y1 or x2y2 to that point.
+// Consider not snapping if too far away.
+ 
+ 
+// Set the initial dimensions of the graph by calling resize()
+var width;
+var height;
+ 
+// Globals
+var csvdataIn;
+var data = null;
+ 
+var axisTickPx = "16px";
+var axisSmallTickPx = "12px";
+var AxisLabelPx = "20px";
+var titlePx = "32px";
+ 
+var winWidth;
+var winHeight;
+var winTileHeight;
+var winTileWidth;
+var winScale;
+ 
+// Scales for the axes
+var x;
+var y;
+ 
+// The axis definitions
+var xAxis;
+var yAxis;
+ 
+// The groups containing the drawn axes
+var gX;
+var gY;
+ 
+// The svg zoom, no attach, no draw; define watcher
+var myZoom;
+ 
+// leftmost and rightmost on-screen x values, for filtering, for speed
+var realxleft;
+var realxright;
+var realxrightmost;	// includes the margin.right padding
+
+var reddot;
+ 
+// Dummy data to show when there is a missing file name
+var dummyData = {
+"title" : "File not found",
+"axisLabelX" : " ",
+"axisLabelY" : " ",
+"dotColor" : "black",
+"dotR" : 3,
+"shortUnitsX" : "s",
+"shortUnitsY" : "B",
+"shortMulX" : 1,
+"shortMulY" : 4096,
+"thousandsX" : 1000,
+"thousandsY" : 1024,
+"points" : [[0, 0], [999.0, -1]]
+};
+
+// Accessor functions for 3-element points
+// ts           block#
+function ts(d)  {return d[0];}
+function tsrel(d)  {return d[0];}
+function ku_tcp(d)  {return d[1];}
+function ku_tcp_align(d) {return d[2];}
+
+// parse the date / time
+var parseTime = d3.timeParse("%d-%b-%y");
+ 
+// Set listener for windowsize
+window.addEventListener("resize", resize);
+ 
+// Set listener for button
+document.getElementById("size720").onclick = reset720;
+document.getElementById("size900").onclick = reset900;
+////document.getElementById("resetzoom").onclick = resetzoom;
+ 
+ 
+// Watcher for mouse wheel, mouse pan within svgdotg
+// When activated, changes translate/scale of view (which changes drawing), 
+// resets scales x and y, reattaches to xAxis and yAxis, redraws groups gX and 
+ 
+var savedtransform = {k:1, x:0, y:0};
+ 
+// Forward map pre-zoomed pixels to pan/zoom client pixels
+function panzoomX(x, transform) {
+  //return ((x + transform.x) * transform.k);
+  return ((x * transform.k + transform.x));
+}
+function panzoomY(y, transform) {
+  //return ((y + transform.y) * transform.k);
+  return ((y * transform.k + transform.y));
+}
+ 
+// Backmap mouse client pixels to pre-zoomed pixels
+function panzoomInvertX(x, transform) {
+  return ((x - transform.x) / transform.k);
+}
+function panzoomInvertY(y, transform) {
+  return ((y - transform.y) / transform.k);
+}
+ 
+ 
+// Fancier thousands scaling, 3 digits
+function shortnum(x, thousands) {
+  var x0 = x;
+  var k = 0;
+  if (x == 0) {return d3.format(".0f")(x);}
+  while (Math.abs(x0) >= thousands && k < 4) {x0 = x0 / thousands; k = k + 1;}
+  while (Math.abs(x0) < 1 && k > -4) {x0 = x0 * thousands; k = k - 1;}
+  // Now we have 1 <= x0 < thousands (which is expected to be 1000 or 1024),
+  // if between roughly 10**-12 and 10**12
+  var fmt = ".0f";
+  if (x0 < 99.99) {fmt = ".1f";}
+  if (x0 < 9.999) {fmt = ".2f";}
+  if (x0 < 0.9999) {fmt = ".3f";}
+  // Note space if no units scaling letter
+  return d3.format(fmt)(x0) + "pnum KMGT"[k+4];
+}
+
+// Self-contained thousands scaling, 5 digits
+function shortnum5(x) {
+  var x0 = x;
+  var k = 0;
+  if (x <= 0) {return d3.format(".0f")(x);}
+  while (Math.abs(x0) >= (2000) && k < 4) {x0 = x0 / 1000; k = k + 1;}
+  while (Math.abs(x0) < 2 && k > -4) {x0 = x0 * 1000; k = k - 1;}
+  // Now we have 2 <= x0 < 2000 
+  var fmt = ".1f";
+  if (x0 < 999.9) {fmt = ".2f";}
+  if (x0 < 99.99) {fmt = ".3f";}
+  if (x0 < 9.999) {fmt = ".4f";}
+  // Note space if no units scaling letter
+  return d3.format(fmt)(x0) + "pnum KMGT"[k+4] + "s";
+}
+  
+function hhmmss(x) {
+  var xt = Math.trunc(x);
+  var milli = Math.round((x - xt) * 1000);
+  var hh = Math.trunc(xt / 3600) % 60;
+  var mm = Math.trunc(xt / 60) % 60;
+  var ss =  Math.trunc(xt) % 60; 
+//console.log("hhmmss(", x, ")=", hh, mm, ss, milli, (x - xt) * 1000);
+  return d3.format("02.0f")(hh) + ":" + d3.format("02.0f")(mm) + ":" + d3.format("02.0f")(ss)  + (milli != 0 ? "." + d3.format("03.0f")(milli) : "");
+}
+ 
+function resetlines() {
+  d3.selectAll(".rubberline").remove() ;
+  d3.selectAll(".rubbertext").remove() ;
+}
+
+function resetonscreen() {
+  // Initialize the left and right values
+  var xleft = x.invert(0); 
+  var xright = x.invert(width); 
+  var xrightmost = x.invert(width + margin.right); 
+  realxleft = xleft + basetime;
+  realxright = xright + basetime;
+  realxrightmost = xrightmost + basetime;
+}
+
+
+function onscreen(d) {
+  return (ts(d) <= realxrightmost && realxleft <= (ts(d)));
+}
+
+function zoomed() {
+//console.log("zoomed", d3.event.transform.k);
+  // Remove any previous rubberlines
+  resetlines();
+ 
+  var newk = d3.event.transform.k;
+  savedtransform = d3.event.transform;
+//VERYTEMP. scaling drops line/dots when extreme zoomin.
+//if (newk > 64000) {newk = 64000;}
+ 
+  // Remap the line and set width back to constant
+  ////view.attr("transform", d3.event.transform);
+  ////d3.selectAll(".graphline").style("stroke-width", (2 / newk) + "px");
+ 
+  // Remap the dots and set size back to constant
+  svg.selectAll(".graphdot").attr("transform", d3.event.transform); 
+  d3.selectAll(".graphdot").style("r", (data.dotR / newk) + "px");
+ 
+
+  // Look at the new displayed x-axis extent, backmapping to data values
+  var xleft = d3.event.transform.rescaleX(x).invert(0); 
+  var xright = d3.event.transform.rescaleX(x).invert(width); 
+  var xrightmost = d3.event.transform.rescaleX(x).invert(width + margin.right); 
+  realxleft = xleft + basetime;
+  realxright = xright + basetime;
+  realxrightmost = xrightmost + basetime;
+
+ 
+  var xdomainwidth = Math.abs(xright - xleft);
+  // console.log("  width", xdomainwidth);
+
+  // If width >= 10 msec, use seconds
+  xAxisFmt = ".3f";
+  basetime = initialBasetime;		// Back to nearest minute
+  x.domain(d3.extent(data.points, function(d) { return tsrel(d); }));
+
+  // If less than 10 msec across, switch to showing usec delta from seconds
+  if (xdomainwidth  < 0.010) {
+    xAxisFmt = ".6f";
+    basetime = Math.trunc(realxleft) % 60;
+    x.domain(d3.extent(data.points, function(d) { return tsrel(d); }));
+  }
+ 
+  // If less than 1 msec across, switch to showing usec delta from msec
+  if (xdomainwidth  < 0.001000) {
+    xAxisFmt = ".6f";
+    basetime = (Math.trunc(realxleft *1000) % 60000) / 1000;
+    x.domain(d3.extent(data.points, function(d) { return tsrel(d); }));
+  }
+ 
+  // If less than 100 usec across, switch to showing nsec delta from msec
+  if (xdomainwidth  < 0.000100) {
+    xAxisFmt = ".9f";
+    basetime = (Math.trunc(realxleft *1000) % 60000) / 1000;
+    x.domain(d3.extent(data.points, function(d) { return tsrel(d); }));
+  }
+ 
+  basetimeText.text("basetime " + hhmmss(basetime));
+
+  xAxis.ticks(10, xAxisFmt);
+  xAxis.tickFormat(shortnum5);
+
+  // Remap the axes
+  gX.call(xAxis.scale(d3.event.transform.rescaleX(x)));
+  gY.call(yAxis.scale(d3.event.transform.rescaleY(y)));
+ 
+  // Get the tick font size back
+  d3.selectAll(".tick").style("font-size", axisTickPx);
+ 
+  // Stagger the labels
+  gX.selectAll(".tick line")  // select all the text elements for the xaxis
+          .attr("y2", function(d, i) {return 6 + (i & 1) * textsize.tick;});
+  gX.selectAll(".tick text")  // select all the text elements for the xaxis
+          .attr("y", function(d, i) {return 9 + (i & 1) * textsize.tick;});
+  
+}
+ 
+function reset720() {
+  // svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity);
+  winWidth = 1280;
+  winHeight = 720;
+  resize2();
+}
+
+function reset900() {
+  winHeight = 900;
+  winWidth = 1600;
+  resize2();
+}
+ 
+function resetzoom() {
+  // Remove any previous rubberlines
+  resetlines();
+ 
+  innerrect.call( myZoom.transform, d3.zoomIdentity );
+  ////d3.selectAll(".graphline").attr("transform", null);
+  d3.selectAll(".graphdot").attr("transform", null);
+  savedtransform = {k:1, x:0, y:0};
+
+  basetime = initialBasetime;
+  
+  // Look at the new displayed x-axis extent, backmapping to data values
+  var xleft = x.invert(0); 
+  var xright = x.invert(width); 
+  var xrightmost = x.invert(width + margin.right); 
+  realxleft = xleft + basetime;
+  realxright = xright + basetime;
+  realxrightmost = xrightmost + basetime;
+ 
+  basetimeText.text("basetime " + hhmmss(basetime));
+ 
+  resize2();
+}
+ 
+ 
+// on mousedown -- start line at backmap of pos clientX clientY button=0 and shiftKey=true , remove any prior visible line
+//  create mousemove mouseup listener
+// mousemove -- continue line, redraw  clientX clientY
+// moutseup -- abandon line if shiftKey=true
+//                   keep line visible if shiftKey=false
+// mouseout mouseleave -- ignore until mousein
+// mouseenter mouseover
+// event.stopPropagation()
+ 
+// For rubberband
+var rubberand;
+var x1, y1;
+ 
+// To snap to nearest point, we have mouse point x,y scaled to data units and data array.
+// Taking advantage of data being sorted by x value, we use bisect (binary search) to find a nearby point
+// Then refine based on two nearby points to see closest x** + y**2. 
+// THIS: Or not bother and just use closest x. Snap x1y1 or x2y2 to that point.
+// Consider not snapping if too far away.
+ 
+// For convenience, we want to binary search in raw client pixels.
+// So in function(d) we map data into range/domain and then into pan/zoom
+ 
+var bisectPoint = d3.bisector(function(d) { return panzoomX(x(d[0] - basetime), savedtransform); }).left;
+ 
+// Snap raw input [x,y] pair to nearest x in data, returning [x',y'] of that data point
+// Allow [0,0] to be the closest datapoint
+function doSnap(xy, data) {
+    var i = bisectPoint(data.points, xy[0], 1, data.points.length - 1);
+//console.log("doSnap i =", i);
+    var xa = panzoomX(x(data.points[i - 1][0] - basetime), savedtransform),
+        ya = panzoomY(y(data.points[i - 1][1]), savedtransform),
+        xb = panzoomX(x(data.points[i][0] - basetime), savedtransform),
+        yb = panzoomY(y(data.points[i][1]), savedtransform),
+	xc = panzoomX(x(0), savedtransform),
+        yc = panzoomY(y(0), savedtransform);
+//console.log("doSnapxa,xb =", xa, xb, xc);
+ 
+    // Return closest x point
+    if ((xy[0] - xc) < (xa - xy[0])) {return [xc, yc];}
+    if ((xy[0] - xa) < (xb - xy[0])) {return [xa, ya];}
+    return [xb, yb];  
+}
+ 
+ 
+ 
+function mousedown() {
+console.log("line mousedown ==========", event);
+    // If not shiftKey, pass it on
+    if (!event.shiftKey) {return;}
+ 
+    // Remove any previous rubberlines
+    resetlines();
+ 
+    // var m = d3.mouse(this);
+ 
+    // Snap to nearest data point x value and corresponding y value
+    var m = doSnap(d3.mouse(this), data);
+    x1 = m[0];
+    y1 = m[1];
+ 
+    rubberband = innersvgdotg.append("path")	// Placeholder objects
+        .attr("class", "rubberline");
+    rubbertextx = innersvgdotg.append("text")
+        .attr("class", "rubbertext");
+    rubbertexty = innersvgdotg.append("text")
+        .attr("class", "rubbertext");
+    rubbertextdiag = innersvgdotg.append("text")
+        .attr("class", "rubbertext");
+ 
+    innersvgdotg.on("mousemove", mousemove);
+    event.stopPropagation();
+}
+ 
+// TODO yet: backmap x1y1 and x2y2 into values, display those formatted with units
+ 
+function mousemove() {
+console.log("line mousemove");
+    var m = doSnap(d3.mouse(this), data);
+    //var m = d3.mouse(this);
+    var x2 = m[0];
+    var y2 = m[1];
+ 
+   // backmap mouse client pixels to pre-zoomed pixels
+   var bmx1 = panzoomInvertX(x1, savedtransform);
+   var bmy1 = panzoomInvertY(y1, savedtransform);
+   var bmx2 = panzoomInvertX(x2, savedtransform);
+   var bmy2 = panzoomInvertY(y2, savedtransform);
+ 
+   // backmap to data values
+   var dx1 = x.invert(bmx1);
+   var dy1 = y.invert(bmy1);
+   var dx2 = x.invert(bmx2);
+   var dy2 = y.invert(bmy2);
+ 
+   var deltax = Math.abs(dx2 - dx1) * data.shortMulX;
+   var deltay = Math.abs(dy2 - dy1) * data.shortMulY;
+   var diag = deltay / deltax;
+ 
+    // Make a triangle path and label it
+    var path = d3.path();
+    path.moveTo(x2, y1);
+    path.lineTo(x1, y1);
+    path.lineTo(x2, y2);
+    path.closePath();
+    // Update the path placeholder
+    rubberband.attr("d", path);
+ 
+    // X text (always show)
+    var xtextx = (x1 + x2) / 2;
+    var xtexty = y1 + textsize.tick;
+    if (y2 > y1) {xtexty = y1 - 4;}
+    rubbertextx
+      .attr("transform", "translate(" + (xtextx) + ", " + (xtexty) + ")")
+      .attr("font-size", axisSmallTickPx)
+      .text(shortnum(deltax, data.thousandsX) + data.shortUnitsX);
+ 
+    // Y text (only if non-zero)
+    var ytextx = x2 + textsize.tick;
+    if (x2 < x1) {ytextx = x2 - 4;}
+    var ytexty = (y1 + y2) / 2;
+    rubbertexty
+      .attr("transform", "translate(" + (ytextx) + ", " + (ytexty) + ")rotate(-90)")
+      .attr("font-size", axisSmallTickPx)
+      .text(deltay == 0 ? "" : shortnum(deltay, data.thousandsY) + data.shortUnitsY);
+ 
+    // Diagonal text (only if y is nonzero)
+    var diagtextx = (x1 + x2) / 2;
+    var diagtexty = (y1 + y2) / 2;
+    var diagdy = -8;
+    if (y2 > y1) {diagdy = textsize.tick;}
+    var diagangle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+    if (diagangle > 90) {diagangle = diagangle - 180;}
+    if (diagangle < -90) {diagangle = diagangle + 180;}
+    rubbertextdiag
+      .attr("transform", "translate(" + (diagtextx) + ", " + (diagtexty) + ")rotate(" + diagangle + ")")
+      .attr("dy", diagdy)
+      .attr("font-size", axisSmallTickPx)
+      .text(deltay == 0 ? "" : shortnum(diag, data.thousandsY) + data.shortUnitsY + "/" + data.shortUnitsX);
+ 
+    event.stopPropagation();
+}
+ 
+function mouseup() {
+console.log("line mouseup");
+    innersvgdotg.on("mousemove", null);
+    // If shift key is still down, remove this rubberline
+    if (event.shiftKey) {
+      resetlines();
+    }
+    event.stopPropagation();
+}
+ 
+ 
+ 
+ 
+ 
+function resize2() {
+  // Remove any previous rubberlines and other state
+  resetlines();
+  savedtransform = {k:1, x:0, y:0};
+  basetime = initialBasetime;
+ 
+  winTileHeight = Math.max(2, Math.floor(winHeight / 120));
+  winTileWidth = Math.max(2, Math.floor(winWidth / 160));
+  winScale =  Math.min(winTileHeight, winTileWidth);
+  //console.log("winScale:", winHeight, winWidth,  winScale);
+ 
+  // Rescale the text sizes
+  textsize.title = (8 * winScale); 
+  textsize.tick = Math.max(9, (3.5 * winScale));  // Don't let it get too small
+  textsize.smalltick = Math.max(9, Math.min(15, textsize.tick * 0.75));  // Not too small or big
+  textsize.label = (5 * winScale);
+
+ 
+  titlePx =  textsize.title + "px";
+  axisTickPx =  textsize.tick + "px";
+  axisSmallTickPx =  textsize.smalltick + "px";
+  axisLabelPx =  textsize.label + "px";
+ 
+  margin.top = textsize.title + 3;			// Title + pad
+  margin.left = textsize.label + 3 * textsize.tick + 6;	// Label + tick text ~4 chars + tick itself
+  margin.right = 1.5 * textsize.tick;			// tick text ~2 chars
+  margin.bottom = textsize.tick * 2 + textsize.label * 1.25 + 6;	// Tick text x2 (stagger) + label/descender + tick itself
+ 
+  height =winTileHeight * 120 - margin.top - margin.bottom - winMargin.height;
+  width = winTileWidth * 160 - margin.left - margin.right - winMargin.width;
+ 
+  // Now create a different-size svg object and redraw
+  d3.select("svg").remove() ;
+ 
+  svg = d3.select("body").append("svg")    
+    // .attr("transform", "translate(" + margin.left + "," + margin.top + ")")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom);
+ 
+  svgdotg = svg.append("g")
+    .attr("class", "svgdotg")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+ 
+  innersvg = svgdotg.append("svg")
+    .attr("width", width + margin.right)	// Alow room for labels to hang out right
+    .attr("height", height);
+ 
+  innersvgdotg = innersvg.append("g") 
+    .on("mousedown", mousedown)
+    .on("mouseup", mouseup);
+ 
+ 
+  if (data != null) {
+    redraw();
+    // Change the font sizes to scale with window size
+    d3.selectAll(".title-text").style("font-size", titlePx).style("fill", "blue");
+    d3.selectAll(".axis-text").style("font-size", axisLabelPx).style("fill", "black");
+    d3.selectAll(".tick").style("font-size", axisTickPx);
+  }
+}
+ 
+ 
+function resize() {
+  // winWidth = window.innerWidth || e.target.outerWidth;
+  // winHeight = window.innerHeight || e.target.outerHeight;
+  winWidth = window.innerWidth;
+  winHeight = window.innerHeight;
+  resize2();
+}
+ 
+ 
+
+ 
+function myFilter() {
+  return !event.shiftKey;
+}
+ 
+ 
+ 
+function redraw() {
+console.log("redraw");
+  // Define the line, using scales x and y to map to pixel point values .x and .y. No draw
+  var valueline = d3.line()
+    .x(function(d) { return x(d[0] - basetime); })
+    .y(function(d) { return y(d[1]); });
+ 
+  // Set the scales and ranges
+  // To keep circles all visible within the svg clipping rectangle, we need ~5px of padding around the range
+  x = d3.scaleLinear().range([5, width-5]).nice(10);
+  y = d3.scaleLinear().range([height-5, 5]).nice(10);
+ 
+  // Set scale domains to the range of the data
+  x.domain(d3.extent(data.points, function(d) { return d[0] - basetime; }));
+  // Y-axis to encompass both before and after tcpdump offsets, plus 10% top and bottom
+  var yext1 = d3.extent(data.points, function(d) { return d[1]; });
+  var yext2 = d3.extent(data.points, function(d) { return d[2]; });
+  var yext_lo = Math.min(yext1[0], yext2[0]);
+  var yext_hi = Math.max(yext1[1], yext2[1]);
+  var yspan = yext_hi - yext_lo;
+  yext_lo -= yspan * 0.1;
+  yext_hi += yspan * 0.1;
+  y.domain([yext_lo, yext_hi]);
+ 
+  // Define axes using scales x and y, no attach, no draw
+  xAxis = d3.axisBottom(x).ticks(10);
+  yAxis = d3.axisLeft(y).ticks(10);
+ 
+  // Add the valueline path, attaching data, show
+  // view = svgdotg.append("path")
+  ////view = innersvgdotg.append("path")
+  ////    .data([data.points])
+  ////    .attr("class", "graphline")
+  ////    .attr("d", valueline)
+  ////    .attr("style", "stroke-width: 2px");
+ 
+  // Add the scatterplot
+  // Original tcpdump timestamp offset to kutrace
+  innersvgdotg.selectAll("graphdot")
+      .data(data.points)
+    .enter().append("circle")
+      .attr("class", "graphdot")
+      .attr("fill", data.dotColor)
+      .attr("r", data.dotR)
+      .attr("cx", function(d) { return x(d[0] - basetime); })
+      .attr("cy", function(d) { return y(d[1]); });
+  // Aligned tcpdump timestamp offset to kutrace
+  innersvgdotg.selectAll("graphdot")
+      .data(data.points)
+    .enter().append("circle")
+      .attr("class", "graphdot")
+      .attr("fill", "white")
+      .attr("r", data.dotR * 0.75)
+      .attr("cx", function(d) { return x(d[0] - basetime); })
+      .attr("cy", function(d) { return y(d[2]); });
+  innersvgdotg.selectAll("graphdot")
+      .data(data.points)
+    .enter().append("circle")
+      .attr("class", "graphdot")
+      .attr("fill", "black")
+      .attr("r", data.dotR * 0.5)
+      .attr("cx", function(d) { return x(d[0] - basetime); })
+      .attr("cy", function(d) { return y(d[2]); });
+ 
+  // Last, add the rectangle we anchor the zoom action to
+  // If we add it earlier, we can't zoom if excatly over the line or dots
+  innerrect = innersvgdotg.append("rect")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("style", "fill:rgba(255,240,255,0)");	// Transparent. 0=>0.5 to make half visible
+ 
+ 
+// Show the base point
+reddot = svgdotg.append("circle").attr("cx", 0).attr("cy", height).attr("r", 7).attr("fill", "red");
+ 
+// Set listener for red dot
+reddot.on("click", resetzoom);
+ 
+// Mark the boundaries
+// Just highlight 720 x 1280
+//if ((winTileHeight  == 6) && winTileWidth == 8) {
+//svgdotg.append("circle").attr("transform", "translate(" + (width/2) + " ," + 0 + ")")
+//  .attr("cx", 0).attr("cy", 0).attr("r", 3).attr("fill", "blue");
+//svgdotg.append("circle").attr("transform", "translate(" + (width/2) + " ," + height + ")")
+//  .attr("cx", 0).attr("cy", 0).attr("r", 3).attr("fill", "blue");
+//svgdotg.append("circle").attr("transform", "translate(" + 0 + " ," + (height/2) + ")")
+//  .attr("cx", 0).attr("cy", 0).attr("r", 3).attr("fill", "blue");
+//svgdotg.append("circle").attr("transform", "translate(" + width + " ," + (height/2) + ")")
+//  .attr("cx", 0).attr("cy", 0).attr("r", 3).attr("fill", "blue");
+//}
+ 
+ 
+  // Add the graph title
+  svgdotg.append("text")             
+      .attr("transform", "translate(" + (width/2) + " ," + "-3)")
+      .attr("class", "title-text")
+      .style("text-anchor", "middle")
+      .text(data.title);
+ 
+  // Add the x Axis group
+  gX = svgdotg.append("g")
+      .attr("class", "axis axis--x")
+      .attr("transform", "translate(0," + height + ")")
+      .call(xAxis);
+ 
+  // Get the tick font size back
+  //d3.selectAll(".tick").style("font-size", axisTickPx);
+ 
+  // Stagger the labels
+  gX.selectAll(".tick line")  // select all the text elements for the xaxis
+          .attr("y2", function(d, i) {return 6 + (i & 1) * textsize.tick;});
+  gX.selectAll(".tick text")  // select all the text elements for the xaxis
+          .attr("y", function(d, i) {return 9 + (i & 1) * textsize.tick;});
+ 
+  // Text label for the x axis, w/room for descenders
+  svgdotg.append("text")             
+      .attr("transform",  "translate(" + (width/2) + " ," + (height + margin.bottom - textsize.label * 0.25) + ")")
+      .attr("class", "axis-text")
+      .style("text-anchor", "middle")
+      .text(data.axisLabelX);
+ 
+  // Base time for the x axis
+  basetimeText = svgdotg.append("text")             
+      .attr("transform",  "translate(" + (0) + " ," + (height + textsize.tick * 3 + 6) + ")")
+      .attr("font-family", "sans-serif")
+      .attr("font-size", textsize.tick *0.75 + "px")
+      .text("(basetime " + hhmmss(basetime) + ")");
+ 
+  // Add the y Axis group
+  gY = svgdotg.append("g")
+      .attr("class", "axis axis--y")
+      .call(yAxis);
+ 
+  // Text label for the y axis
+  svgdotg.append("text")
+      .attr("transform", "rotate(-90)")
+      .attr("class", "axis-text")
+      .attr("y", 0 - margin.left)
+      .attr("x",0 - (height / 2))
+      .attr("dy", "0.9em")
+      .style("text-anchor", "middle")
+      .text(data.axisLabelY);   
+ 
+  // Define a zoom, no attach, no draw; define watcher
+  // Initializes with zoomIdentity
+  myZoom = d3.zoom()
+    // .scaleExtent([0.5, 10000])
+    //  .translateExtent([[-100, -100], [width + 100, height + 100]])
+    .filter(myFilter)
+    .on("zoom", zoomed);
+ 
+ 
+  // Apply zoom function to entire inner rectangle; sets watcher
+  innerrect.call(myZoom);     // This just enables on theline itself, passive
+};
+ 
+ 
+// Main JavaScript program
+// Wait for a file name keyup = CR
+
+<!-- selfcontained2 -->
+var data2 = JSON.parse(myString); newdata2_resize(data2);
+
+</script>
+</body>
+</html>
+ 
+ 
+
