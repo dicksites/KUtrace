@@ -67,6 +67,7 @@
 // 2023.07.24 dsites Make default syscall dff, not 9ff
 // 2024.07.03 dsites Add MakeIPISpan processing
 // 2024.07.06 dsites Do CPU-related cexit latency tables
+// 2024.09.01 dsites Add wakeup reason for monitor-store
 
 // Compile with  g++ -O2 eventtospan3.cc -o eventtospan3
 
@@ -385,6 +386,7 @@ typedef struct {
 // Globals across all CPUs
 //
 typedef map<int, PidState> PerPidState;	// State of each suspended task, by PID
+typedef map<int, char> WaitReason;	// Per-CPU reason for a wait for its next process after idle
 typedef map<int, string> IntName;	// Name for each PID/lock/method
 typedef map<int, OneSpan> PidWakeup;	// Previous wakeup event, by PID
 typedef map<int, uint64> PidTime;	// Previous per-PID timestamp (span end, kernel-seen packet)
@@ -550,15 +552,16 @@ static int incoming_flags = 0;    // Incoming flags, if any, from ## FLAGS: 128
 IntName pidnames;		  // Current name for each PID, by pid#
 				  //   Changes over time if execve and the like
 IntName pidrownames;		  // Collected names for each PID (clone, execve, etc. rename a thread), by pid#
-				  //   Accumulates name sn order over time
-PidWakeup pendingWakeup;	  // Any pending wakeup event, to make arc from wakeup to running
-PidWakeup pendingIPI;	 	  // Any pending IPI event, to make arc from sender to target CPU
-PidWakeup priorPidEvent;	  // Any prior event for each PID, to make wait_xxx display
+				  //   Accumulates names in order over time
+WaitReason pendingWait;		  // Per-CPU reason next process was waiting, for monitor-store
+PidWakeup pendingWakeup;	  // Any pending wakeup event, to make arc from wakeup to running [PID]
+PidWakeup pendingIPI;	 	  // Any pending IPI event, to make arc from sender to target CPU [cpu]
+PidWakeup priorPidEvent;	  // Any prior event for each PID, to make wait_xxx display       [PID]
 PidTime priorPidEnd;	 	  // Any prior span end for each PID, to make wait_xxx display
 PidLock priorPidLock;	 	  // Any prior lock hash number for each PID, to make wait_xxx display
 IntName locknames;		  // Incoming lock name definitions
 LockPending lockpending;	  // pending KUTRACE_LOCKNOACQUIRE/etc. events, by lock hash
-PidWakeup pendingLock;	  	  // Any pending lock acquire event, to make wait_lock from try to acquire
+PidWakeup pendingLock;	  	  // Any pending lock acquire event, to make wait_lock from try to acquire [lock]
 PidTime pendingKernelRx;  	  // Any pending RX_PKT time, waiting for subsequent RPCID
 PidRunning pidRunning;		  // Set of currently-running PIDs
 				  // A PID is running from the /sched that context switches to it until
@@ -1490,6 +1493,71 @@ void DumpShort(FILE* f, const CPUState* thiscpu) {
   fprintf(f, "\n");
 }
 
+char FindWaitReason(uint64 ts, const string& wakername) {
+  // NOTE: This is mostly Linux centric. Other names might occur in FreeBSD, etc.
+  // Create wait_* events
+  // Also see soft_irq_name in rawtoevent.cc
+  char letter = ' ';		// Default = unknown reason for waiting
+  if (wakername == "local_timer_vector") {	// timer
+    letter = 't';		// timer
+  } else if (wakername == "arch_timer") {	// Rpi time
+    letter = 't';		// timer
+  } else if (wakername == "riscv-timer") {	// Risc-v time
+    letter = 't';		// timer
+  } else if (wakername == "page_fault") {	// memory
+    letter = 'm';		// memory
+  } else if (wakername == "mmap") {
+    letter = 'm';		// memory
+  } else if (wakername == "munmap") {
+    letter = 'm';		// memory
+  } else if (wakername == "mprotect") {
+    letter = 'm';		// memory
+  } else if (wakername == "madvise") {
+    letter = 'm';		// memory
+  } else if (wakername == "futex") {	// lock
+    letter = 'l';		// lock
+  } else if (wakername == "writev") {	// pipe
+    letter = 'p';		// pipe
+  } else if (wakername == "write") {
+    letter = 'p';		// pipe
+  } else if (wakername == "sendto") {
+    letter = 'p';		// pipe
+  } else if (wakername == "open") {
+    letter = 'p';		// pipe
+  } else if (wakername == "openat") {
+    letter = 'p';		// pipe
+  } else if (wakername.substr(0,7) == "kworker") {
+    letter = 'p';		// pipe
+  } else if (wakername == "BH:hi") {	// tasklet
+    letter = 'k';		// high prio tasklet or unknown BH fragment
+  } else if (wakername == "BH:timer") {	// time
+    letter = 't';		// timer
+  } else if (wakername == "BH:tx") {	// network
+    letter = 'n';		// network
+  } else if (wakername == "BH:rx") {
+    letter = 'n';		// network
+  } else if (wakername == "BH:block") {	// disk
+    letter = 'd';		// disk/SSD
+  } else if (wakername == "BH:irq_p") {
+    letter = 'd';		// disk/SSD (iopoll)
+  } else if (wakername == "syncfs") {
+    letter = 'd';		// disk/SSD
+  } else if (wakername == "fdatasync") {
+    letter = 'd';		// disk/SSD
+  } else if (wakername == "BH:taskl") {
+    letter = 'k';		// normal tasklet
+  } else if (wakername == "BH:sched") {	// sched
+    letter = 's';		// scheduler (load balancing)
+  } else if (wakername == "BH:hrtim") {
+    letter = 't';		// timer
+  } else if (wakername == "BH:rcu") {
+    letter = 't';		// read-copy-update release code
+////  } else { // VERYTEMP
+////    fprintf(stdout, "%llu unknown wakeup %s ...\n", ts, wakername.c_str());
+  }
+  return letter;
+}
+
 // Insert wait_* span for reason that we were waiting
 void WaitBeforeWakeup(const OneSpan& event, CPUState* cpustate, PerPidState* perPidState) {
   CPUState* thiscpu = &cpustate[event.cpu];
@@ -1511,68 +1579,19 @@ void WaitBeforeWakeup(const OneSpan& event, CPUState* cpustate, PerPidState* per
   OneSpan& old_event = priorPidEvent[target_pid];
   const PidState* stack = &thiscpu->cpu_stack;
 
-  // NOTE: This is mostly Linux centric. Other names might occur in FreeBSD, etc.
-  // Create wait_* events
-  // Also see soft_irq_name in rawtoevent.cc
-  char letter = ' ';		// Default = unknown reason for waiting
-  if (stack->name[stack->top] == "local_timer_vector") {	// timer
-    letter = 't';		// timer
-  } else if (stack->name[stack->top] == "arch_timer") {		// Rpi time
-    letter = 't';		// timer
-  } else if (stack->name[stack->top] == "riscv-timer") {	// Risc-v time
-    letter = 't';		// timer
-  } else if (stack->name[stack->top] == "page_fault") {	// memory
-    letter = 'm';		// memory
-  } else if (stack->name[stack->top] == "mmap") {
-//DumpEvent(stdout, "letter m1", event);
-    letter = 'm';		// memory
-  } else if (stack->name[stack->top] == "munmap") {
-//DumpEvent(stdout, "letter m2", event);
-    letter = 'm';		// memory
-  } else if (stack->name[stack->top] == "mprotect") {
-//DumpEvent(stdout, "letter m3", event);
-    letter = 'm';		// memory
-  } else if (stack->name[stack->top] == "madvise") {
-//DumpEvent(stdout, "letter m4", event);
-    letter = 'm';		// memory
-  } else if (stack->name[stack->top] == "futex") {	// lock
-    letter = 'l';		// lock
-  } else if (stack->name[stack->top] == "writev") {	// pipe
-    letter = 'p';		// pipe
-  } else if (stack->name[stack->top] == "write") {
-    letter = 'p';		// pipe
-  } else if (stack->name[stack->top] == "sendto") {
-    letter = 'p';		// pipe
-  } else if (stack->name[stack->top] == "open") {
-    letter = 'p';		// pipe
-  } else if (stack->name[stack->top] == "openat") {
-    letter = 'p';		// pipe
-  } else if (stack->name[stack->top].substr(0,7) == "kworker") {
-    letter = 'p';		// pipe
-  } else if (stack->name[stack->top] == "BH:hi") {	// tasklet
-    letter = 'k';		// high prio tasklet or unknown BH fragment
-  } else if (stack->name[stack->top] == "BH:timer") {	// time
-    letter = 't';		// timer
-  } else if (stack->name[stack->top] == "BH:tx") {	// network
-    letter = 'n';		// network
-  } else if (stack->name[stack->top] == "BH:rx") {
-    letter = 'n';		// network
-  } else if (stack->name[stack->top] == "BH:block") {	// disk
-    letter = 'd';		// disk/SSD
-  } else if (stack->name[stack->top] == "BH:irq_p") {
-    letter = 'd';		// disk/SSD (iopoll)
-  } else if (stack->name[stack->top] == "syncfs") {
-    letter = 'd';		// disk/SSD
-  } else if (stack->name[stack->top] == "BH:taskl") {
-    letter = 'k';		// normal tasklet
-  } else if (stack->name[stack->top] == "BH:sched") {	// sched
-    letter = 's';		// scheduler (load balancing)
-  } else if (stack->name[stack->top] == "BH:hrtim") {
-    letter = 't';		// timer
-  } else if (stack->name[stack->top] == "BH:rcu") {
-    letter = 't';		// read-copy-update release code
+  // The name of the routine doing this wakeup determines what the blocked  
+  // thread was waiting for.
+  char letter = FindWaitReason(event.start_ts, stack->name[stack->top]);
+  
+  // But if a pending monitor-store for our CPU, the reason is in pendingWait.
+  if ((letter == ' ') && (pendingWait.find(event.cpu) != pendingWait.end())) {
+    letter = pendingWait[event.cpu];
+    // Leave it lying around: two+ wakeups may happen
+    ////pendingWait.erase(event.cpu);
+//// VERYTEMP
+//fprintf(stdout, "  %lld Used pendingWait[%d] '%c'\n", event.start_ts, event.cpu, letter);
   }
-
+ 
   if ((letter != ' ')) {
     // Make a wait_* display span
     OneSpan temp_span = thiscpu->cur_span;	// Save
@@ -1604,10 +1623,29 @@ void DoWakeup(const OneSpan& event, CPUState* cpustate, PerPidState* perpidstate
 
 void DoIPI(const OneSpan& event, CPUState* cpustate, PerPidState* perpidstate) {
   CPUState* thiscpu = &cpustate[event.cpu];
+  PidState* stack = &thiscpu->cpu_stack;
   int target_cpu = event.arg;
-  // Remember the IPI
+  
+  // Normally, process A wakes up blocked process B by doing a make-runnable
+  // call from some kernel code to the scheduler. That kernel code determines
+  // the reason for the wakeup and hence the reason for waiting -- disk
+  // interrupt, futex call freeing a software lock, etc.
+  // However, there is a special code of using monitor/mwait/mon-store for
+  // process A to wake up the idle thread on some other CPU, which in turn
+  // wakes up a user thread: monitor-store => idle => user wakeup.
+  // The monitor-store has a target CPU but no target process ID.
+  // The idle thread has a target PID but no idea what caused idle
+  // to run, so no reason for waiting. The code here saves the reason at
+  // the monitor-store, for later retreival by the idle thread.
+  if (event.eventnum == KUTRACE_MONITORSTORE) {
+    char letter = FindWaitReason(event.start_ts, stack->name[stack->top]);
+    pendingWait[target_cpu] = letter;
+//// VERYTEMP
+//fprintf(stdout, "  %lld Saved pendingWait[%d] '%c'\n", event.start_ts, event.cpu, letter);
+  }
+
+  // Remember the IPI start time and reason for the IPI.
   pendingIPI[target_cpu] = event;
-  ////fprintf(stdout, "pendingIPI[%d]=%lld\n", target_cpu, event.start_ts);
 }
 
 void SwapStacks(int oldpid, int newpid, const string& name, CPUState* thiscpu, PerPidState* perpidstate) {
@@ -2035,7 +2073,7 @@ if (verbose) fprintf(stdout, " ===marking old stack ambiguous at ctx_switch to %
   // Connect IPI event to new span if the CPU number matches
   if (pendingIPI.find(event.cpu) != pendingIPI.end()) {
     // We are at an event for which there is a pending IPI delivery
-    // Make an IPI arc
+    // Make an IPI arc to here.
   ////fprintf(stdout, "found pendingIPI[%d]=%lld\n", event.cpu, pendingIPI[event.cpu].start_ts);
     OneSpan temp_span = thiscpu->cur_span;	// Save
     MakeIPISpan(pendingIPI[event.cpu], event, &thiscpu->cur_span);
@@ -2049,10 +2087,10 @@ if (verbose) fprintf(stdout, " ===marking old stack ambiguous at ctx_switch to %
   // Make a wait_cpu display span from the wakeup to here
   if (priorPidEnd.find(event.pid) != priorPidEnd.end()) {
     // We have been waiting for a CPU to become available and it did.
+    
     OneSpan temp_span = thiscpu->cur_span;	// Save
     MakeWaitSpan('c', priorPidEnd[event.pid], event.start_ts, event.pid, 0, &thiscpu->cur_span);
-
-    ////// Consume the pending wait
+    ////// Consume the pending wait.
     ////priorPidEnd.erase(event.pid);
     priorPidEnd[event.pid] = event.start_ts + event.duration;
     // Don't clutter if the waiting is short (say < 10 usec)
