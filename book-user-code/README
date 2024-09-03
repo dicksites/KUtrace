@@ -1,0 +1,15 @@
+This directory contains all the source files used in the book. 
+The compile_all_user.sh script compiles everything.
+
+The kutrace_control.cc program is used to create traces, while other programs
+are used to postprocess those traces into HTML display files. The postproc3.sh
+script takes a tracefile stem (no ".trace") and produces the corresponding JSON
+and HTML files.
+
+Yet other programs are part of the book content or are used in the exercises.
+
+All the code is open sourced under the BSD three-clause license.
+
+
+
+
